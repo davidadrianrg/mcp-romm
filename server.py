@@ -160,17 +160,18 @@ class _TokenState:
 
 _token = _TokenState()
 
-# Least privilege: every read scope the read tools need, plus the three write
-# scopes the write tools actually use (roms.user.write for status/favorites/
-# notes, collections.write for collections, assets.write for save-state and
-# save uploads/deletes/property updates) and tasks.run for the rescan.
-# Deliberately NOT requested: roms.write, platforms.write, firmware.write,
-# users.write, me.write, devices.write — no tool uses them.
+# Least privilege: every read scope the read tools need, plus the write scopes
+# the write tools actually use (roms.user.write for status/favorites/notes,
+# collections.write for collections, assets.write for save-state, save-file and
+# memory-card uploads/deletes/property updates, platforms.write for the
+# server-side gamelist/pegasus exports, me.write for your own notifications)
+# and tasks.run for the rescan. Deliberately NOT requested: roms.write,
+# firmware.write, users.write, devices.write — no tool uses them.
 _DEFAULT_SCOPES = (
-    "me.read "
+    "me.read me.write "
     "roms.read "
     "roms.user.read roms.user.write "
-    "platforms.read "
+    "platforms.read platforms.write "
     "assets.read assets.write "
     "devices.read "
     "firmware.read "
@@ -1688,6 +1689,62 @@ async def romm_devices() -> str:
         lines.append(f"    ID: {device_id}")
 
     return "\n".join(lines)
+
+
+# ── Tools — Write: export (server-side) ──────────────────────────────────
+
+
+@mcp.tool()
+async def romm_export_gamelist(platform_ids: list[int],
+                               local_export: bool = False) -> str:
+    """Write gamelist.xml inside the platform directories ON the RomM server.
+
+    This triggers a server-side export: RomM writes a gamelist.xml file into
+    each platform's directory on the RomM server itself. Nothing is downloaded
+    to the client.
+
+    platform_ids: Platform IDs to export (required; from romm_platforms).
+    local_export: Use RomM's local export mode (default: false).
+    """
+    if not platform_ids:
+        return "platform_ids must contain at least one platform ID."
+    if any(pid <= 0 for pid in platform_ids):
+        return "platform_ids must be positive integers."
+
+    params: dict = {"platform_ids": platform_ids}
+    if local_export:
+        params["local_export"] = True
+
+    await _post("export/gamelist-xml", None, params=params)
+    return (f"Wrote gamelist.xml in the platform directories on the RomM server "
+            f"for {len(platform_ids)} platform(s). Nothing was downloaded to the client.")
+
+
+@mcp.tool()
+async def romm_export_pegasus(platform_ids: list[int],
+                              local_export: bool = False) -> str:
+    """Write metadata.pegasus.txt inside the platform directories ON the RomM server.
+
+    This triggers a server-side export: RomM writes a metadata.pegasus.txt file
+    into each platform's directory on the RomM server itself. Nothing is
+    downloaded to the client.
+
+    platform_ids: Platform IDs to export (required; from romm_platforms).
+    local_export: Use RomM's local export mode (default: false).
+    """
+    if not platform_ids:
+        return "platform_ids must contain at least one platform ID."
+    if any(pid <= 0 for pid in platform_ids):
+        return "platform_ids must be positive integers."
+
+    params: dict = {"platform_ids": platform_ids}
+    if local_export:
+        params["local_export"] = True
+
+    await _post("export/pegasus", None, params=params)
+    return (f"Wrote metadata.pegasus.txt in the platform directories on the RomM "
+            f"server for {len(platform_ids)} platform(s). Nothing was downloaded "
+            f"to the client.")
 
 
 # ── Tools — Tasks ────────────────────────────────────────────────────────

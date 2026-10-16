@@ -9,7 +9,9 @@ Run:
 
 import json
 import os
+from urllib.parse import parse_qs
 
+import httpx
 import pytest
 
 # Ensure import doesn't depend on real credentials.
@@ -92,17 +94,22 @@ def calls(monkeypatch):
 
 def test_scopes_request_only_needed_writes():
     scopes = set(server._DEFAULT_SCOPES.split())
-    # The write scopes the tools actually use, plus task running.
+    # The write scopes the tools actually use, plus task running: user data,
+    # collections, save states/files/memory cards, the server-side
+    # gamelist/pegasus exports (platforms.write) and your own notifications
+    # (me.write).
     assert "roms.user.write" in scopes
     assert "collections.write" in scopes
     assert "assets.write" in scopes
+    assert "platforms.write" in scopes
+    assert "me.write" in scopes
     assert "tasks.run" in scopes
 
 
 def test_scopes_exclude_dangerous_writes():
     scopes = set(server._DEFAULT_SCOPES.split())
-    for forbidden in ("roms.write", "platforms.write", "firmware.write",
-                      "users.write", "me.write", "devices.write"):
+    for forbidden in ("roms.write", "firmware.write", "users.write",
+                      "devices.write"):
         assert forbidden not in scopes, f"{forbidden} should not be requested"
 
 
@@ -1219,3 +1226,99 @@ async def test_saves_omits_empty_slot_and_device(calls):
     out = await server.romm_saves()
     assert calls[0]["params"] == {}
     assert "No saves found." in out
+
+
+# ── Shared: repeatable query-param encoding ─────────────────────────────────
+
+
+def test_multi_value_params_encode_as_repeated_keys():
+    # Contract for the repeatable platform_ids query param (export + random-ROM
+    # tools): a dict whose value is a list must flatten to repeated keys at the
+    # real httpx encoder. No network: the Request is built but never sent.
+    request = httpx.Request(
+        "POST", "https://romm.example/api/export/gamelist-xml",
+        params={"platform_ids": [3, 7], "local_export": True},
+    )
+    # httpx 0.28.1 encodes boolean params lowercase ("true"). request.url.query
+    # is bytes, so decode it before parse_qs to compare against str values.
+    assert parse_qs(request.url.query.decode()) == {
+        "platform_ids": ["3", "7"], "local_export": ["true"],
+    }
+
+
+# ── romm_export_gamelist / romm_export_pegasus ──────────────────────────────
+
+EMPTY_PLATFORM_IDS_MSG = "platform_ids must contain at least one platform ID."
+NON_POSITIVE_PLATFORM_IDS_MSG = "platform_ids must be positive integers."
+
+
+async def test_export_gamelist_shaping_default(calls):
+    out = await server.romm_export_gamelist([3, 7])
+    req = calls[0]
+    assert req["method"] == "POST"
+    assert req["path"] == "export/gamelist-xml"
+    assert req["params"] == {"platform_ids": [3, 7]}
+    assert req["json"] is None
+    assert "gamelist.xml" in out
+    assert "on the RomM server" in out
+    assert "Nothing was downloaded" in out
+
+
+async def test_export_gamelist_local_export_flag(calls):
+    await server.romm_export_gamelist([3, 7], local_export=True)
+    assert calls[0]["params"] == {"platform_ids": [3, 7], "local_export": True}
+    # The default call never includes the flag at all (not even as False).
+    await server.romm_export_gamelist([3, 7])
+    assert "local_export" not in calls[1]["params"]
+
+
+async def test_export_gamelist_empty_platform_ids_no_request(calls):
+    out = await server.romm_export_gamelist([])
+    assert out == EMPTY_PLATFORM_IDS_MSG
+    assert not calls and not calls.bytes and not calls.uploads
+
+
+async def test_export_gamelist_rejects_non_positive_ids_no_request(calls):
+    for bad in ([0], [-2]):
+        out = await server.romm_export_gamelist(bad)
+        assert out == NON_POSITIVE_PLATFORM_IDS_MSG
+    assert not calls and not calls.bytes and not calls.uploads
+
+
+async def test_export_gamelist_api_error_propagates(calls):
+    calls.responses.append(RuntimeError("API error 400: bad"))
+    with pytest.raises(RuntimeError):
+        await server.romm_export_gamelist([3])
+
+
+def test_export_docstrings_state_server_side_write():
+    # Normalize whitespace: docstrings wrap across lines.
+    gamelist = " ".join(server.romm_export_gamelist.__doc__.split())
+    pegasus = " ".join(server.romm_export_pegasus.__doc__.split())
+    assert "gamelist.xml" in gamelist
+    assert "ON the RomM server" in gamelist
+    assert "Nothing is downloaded to the client" in gamelist
+    assert "metadata.pegasus.txt" in pegasus
+    assert "ON the RomM server" in pegasus
+    assert "Nothing is downloaded to the client" in pegasus
+
+
+async def test_export_pegasus_shaping_default(calls):
+    out = await server.romm_export_pegasus([3, 7])
+    req = calls[0]
+    assert req["method"] == "POST"
+    assert req["path"] == "export/pegasus"
+    assert req["params"] == {"platform_ids": [3, 7]}
+    assert req["json"] is None
+    assert "metadata.pegasus.txt" in out
+
+
+async def test_export_pegasus_local_export_flag(calls):
+    await server.romm_export_pegasus([9], local_export=True)
+    assert calls[0]["params"] == {"platform_ids": [9], "local_export": True}
+
+
+async def test_export_pegasus_empty_platform_ids_no_request(calls):
+    out = await server.romm_export_pegasus([])
+    assert out == EMPTY_PLATFORM_IDS_MSG
+    assert not calls and not calls.bytes and not calls.uploads
