@@ -29,3 +29,15 @@ py-modules = ["server"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# Bare `pytest` runs the unit suite only. smoke_test.py is a live end-to-end
+# script (needs a running RomM instance + credentials) and is invoked directly
+# with `python smoke_test.py`; its test_* helpers are not collectable fixtures.
+testpaths = ["test_server.py"]
+
+[tool.ruff.lint]
+# Pin the classic default rule set explicitly. Newer ruff releases started
+# flagging long-standing, deliberate patterns in this codebase (broad excepts
+# in the token/request fallbacks, numeric unions, noqa placement) that this
+# project never opted into; the explicit selection keeps `ruff check .`
+# deterministic across ruff versions instead of drifting with its defaults.
+select = ["E4", "E7", "E9", "F"]
