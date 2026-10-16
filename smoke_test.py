@@ -416,13 +416,24 @@ async def write_tools(ctx: dict) -> None:
     else:
         print("SKIP  smart collections flow — no platform id captured")
 
-    # scan_library: real trigger where allowed; RomM 5.0 refuses manual scans
-    # over REST, and the tool reporting that refusal IS correct behavior.
+    # scan_library: POST /api/tasks/scan. A 409 (scan already running) or 503
+    # (no task worker) is a correct, clearly-reported outcome, not a failure.
     out = await tool_out("romm_scan_library", server.romm_scan_library())
     if out is not None:
         check("romm_scan_library",
-              any(s in out for s in ("triggered", "not enabled",
-                                     "refuses manually triggered")), out)
+              any(s in out for s in ("Library scan started",
+                                     "already in progress",
+                                     "no task worker")), out)
+        m = re.search(r'task_id="([^"]+)"', out) or re.search(r"task_id: (\S+)", out)
+        if m:
+            task_id = m.group(1)
+            detail = await tool_out("romm_task_detail",
+                                    server.romm_task_detail(task_id))
+            if detail is not None:
+                check("romm_task_detail",
+                      looks_ok(detail) and f"Task {task_id}:" in detail, detail)
+        else:
+            print("SKIP  romm_task_detail - no task id returned by the scan")
 
 
 async def main() -> int:

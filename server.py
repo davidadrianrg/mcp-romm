@@ -31,6 +31,7 @@ Tools:
   romm_filters             — Available filter values (genres, regions, etc.)
   romm_tasks               — Task registry + running task status
   romm_scan_library        — Trigger a background library rescan
+  romm_task_detail         — Show a background task's status and result
   romm_activity            — Recent play activity feed (RomM 5.0+)
   romm_play_sessions       — List recorded play sessions (RomM 5.0+)
   romm_virtual_collections — Automatic metadata groupings (RomM 5.0+)
@@ -83,6 +84,7 @@ from __future__ import annotations
 import json as jsonlib
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -346,6 +348,41 @@ def _fmt_rom_line(rom: dict, index: int = 0) -> list[str]:
     lines.append(f"   ID: {rom_id}")
     lines.append("")
     return lines
+def _validate_path_id(
+    name: str, value: object, *, strict_charset: bool
+) -> tuple[str | None, str | None]:
+    """Validate an id that will be interpolated as one URL path segment.
+
+    Returns `(normalized, error)`: exactly one is None. On success `normalized`
+    is the stripped id to interpolate; on failure `error` is a ready-to-return
+    message naming `name`.
+
+    Security invariant: the id must contribute exactly one path segment and
+    cannot append a separator, query or fragment to the request. httpx
+    normalises dot segments inside a path and treats "?" and "#" as delimiters,
+    so a bare "." or ".." is rejected in every mode. `strict_charset=True`
+    admits only `[A-Za-z0-9._-]` (RomM task ids are slug-like);
+    `strict_charset=False` instead rejects a denylist of separators,
+    whitespace, control characters and "%" while allowing the wider character
+    set RomM virtual collection ids may use (for example ":"). In non-strict
+    mode a blank value is left to the caller's existing behaviour.
+    """
+    normalized = str(value).strip()
+    if strict_charset:
+        if not normalized:
+            return None, f"{name} is required."
+        if not re.fullmatch(r"[A-Za-z0-9._-]+", normalized):
+            return None, (f"{name} contains invalid characters. Only letters, "
+                          "digits, dots, underscores and hyphens are allowed.")
+    elif re.search(r"[\x00-\x20\x7f/\\?#%]", normalized):
+        return None, f"{name} contains invalid characters."
+    if normalized in (".", ".."):
+        if strict_charset:
+            return None, f'{name} must not be "." or "..".'
+        return None, f"{name} contains invalid characters."
+    return normalized, None
+
+
 
 
 # ── Tools — Status & Stats ──────────────────────────────────────────────
@@ -1172,34 +1209,95 @@ async def romm_tasks() -> str:
 
 
 @mcp.tool()
-async def romm_scan_library() -> str:
+async def romm_scan_library(full: bool = False) -> str:
     """Trigger a library rescan to discover new ROMs and platforms.
 
     This is a background task — it returns immediately. New ROMs will appear
-    in the library as the scan progresses.
+    in the library as the scan progresses; follow it with romm_task_detail.
 
-    Note: RomM 5.0 marks scan_library as not manually runnable via the REST
-    tasks API — on 5.0 instances this tool reports that instead of scanning.
+    full: Run a full scan instead of the default quick scan (default: false).
     """
+    scan_type = "full" if full else "quick"
     try:
-        data = await _post("tasks/run/scan_library", long_timeout=True)
-        if isinstance(data, dict):
-            job_id = data.get("task_id") or data.get("id", "")
-            status = data.get("status", "started")
-            return f"Library scan triggered (job: {job_id}, status: {status})."
-        return "Library scan triggered."
+        data = await _post("tasks/scan", {"type": scan_type}, long_timeout=True)
     except RuntimeError as e:
         msg = str(e)
-        if "cannot be run" in msg:
+        if "API error 409" in msg:
             return (
-                "RomM refuses manually triggered library scans (scan_library is "
-                "flagged manual_run=false on RomM 5.0). The library rescans on its "
-                "configured schedule — check romm_tasks for the cron — or scan from "
-                "the RomM web UI."
+                "A library scan is already in progress (RomM returned 409). "
+                "Wait for it to finish, then try again."
             )
-        if "422" in msg or "not enabled" in msg.lower():
-            return "Library scan task is not enabled in RomM settings. Enable scheduled rescan first."
+        if "API error 503" in msg:
+            return (
+                "RomM has no task worker available (RomM returned 503), so the "
+                "scan could not be queued. Start a RomM worker and try again."
+            )
         raise
+
+    lines = [f"Library scan started ({scan_type})."]
+    task_id = None
+    if isinstance(data, dict):
+        for field in ("task_key", "task_name", "task_id", "status",
+                      "created_at", "enqueued_at"):
+            value = data.get(field)
+            if value is not None:
+                lines.append(f"  {field}: {value}")
+        task_id = data.get("task_id")
+    if task_id is not None:
+        lines.append(f'Follow progress with romm_task_detail(task_id="{task_id}").')
+    else:
+        lines.append("Follow progress with romm_task_detail using the task_id above.")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def romm_task_detail(task_id: str | int) -> str:
+    """Show a background task's status, timing, and result.
+
+    Missing fields are simply omitted, so this never fails on a partial
+    response.
+
+    task_id: The task's ID (from romm_scan_library or romm_tasks).
+    """
+    # SEC-001: the id is interpolated into the request path, but httpx
+    # normalises dot segments and accepts a query string inside a path, so an
+    # unchecked id could smuggle extra path segments or query parameters (e.g.
+    # "1/../../users/me" would reach GET /api/users/me). SEC-006: a bare "." or
+    # ".." passes a charset allowlist yet httpx collapses it, so it is rejected
+    # too. _validate_path_id guarantees a single path segment (it excludes "/",
+    # "\", "?", "#", "%", whitespace and control characters) so no extra
+    # segment or query can be appended to the "tasks/{...}" path.
+    normalized, error = _validate_path_id("task_id", task_id, strict_charset=True)
+    if error:
+        return error
+
+    data = await _get(f"tasks/{normalized}")
+
+    if not isinstance(data, dict) or not data:
+        return f"No task detail available for {task_id}."
+
+    known = ("task_key", "task_name", "task_id", "status", "created_at",
+             "enqueued_at", "started_at", "ended_at")
+    lines = [f"Task {task_id}:"]
+    for field in known:
+        value = data.get(field)
+        if value is not None:
+            lines.append(f"  {field}: {value}")
+
+    result = data.get("result")
+    if result is not None:
+        if isinstance(result, (dict, list)):
+            rendered = jsonlib.dumps(result, default=str)
+        else:
+            rendered = str(result)
+        if len(rendered) > 500:
+            rendered = rendered[:500] + "..."
+        lines.append(f"  result: {rendered}")
+
+    for key in sorted(k for k in data if k not in known and k != "result"):
+        lines.append(f"  {key}: {data[key]}")
+
+    return "\n".join(lines)
 
 
 # ── Tools — Write: play status & favorites ───────────────────────────────

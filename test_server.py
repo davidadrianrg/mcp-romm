@@ -20,18 +20,42 @@ import server  # noqa: E402
 
 
 class _Recorder(list):
-    """A list of recorded requests that also carries a FIFO `responses` queue."""
+    """A list of recorded requests carrying one FIFO response queue per seam.
+
+    The recorder itself holds the JSON requests (method/path/params/json/data),
+    exactly as before. `bytes` and `uploads` hold the binary and multipart
+    requests; their matching canned responses live in `bytes_responses` and
+    `uploads_responses`.
+    """
     responses: list
+    bytes: list
+    bytes_responses: list
+    uploads: list
+    uploads_responses: list
 
 
 @pytest.fixture
 def calls(monkeypatch):
-    """Capture every outbound request and feed canned responses.
+    """Capture every outbound request and feed canned responses per seam.
 
-    Append to `calls.responses` to pop return values FIFO; otherwise {} is returned.
+    Append to `calls.responses`, `calls.bytes_responses` or
+    `calls.uploads_responses` to pop return values FIFO; the defaults are {} for
+    JSON and multipart and (b"", {}) for bytes. A queued BaseException instance
+    is raised instead of returned, so error paths (409/503, timeouts) can be
+    driven from the same queue.
     """
     recorded = _Recorder()
     recorded.responses = []
+    recorded.bytes = []
+    recorded.bytes_responses = []
+    recorded.uploads = []
+    recorded.uploads_responses = []
+
+    def _next(queue):
+        item = queue.pop(0)
+        if isinstance(item, BaseException):
+            raise item
+        return item
 
     async def fake_request(method, path, *, params=None, json=None, data=None,
                            long_timeout=False, auth_required=True):
@@ -39,7 +63,23 @@ def calls(monkeypatch):
             "method": method, "path": path, "params": params,
             "json": json, "data": data,
         })
-        return recorded.responses.pop(0) if recorded.responses else {}
+        return _next(recorded.responses) if recorded.responses else {}
+
+    async def fake_request_bytes(method, path, *, params=None,
+                                 long_timeout=False, auth_required=True):
+        recorded.bytes.append({
+            "method": method, "path": path, "params": params,
+            "long_timeout": long_timeout,
+        })
+        return _next(recorded.bytes_responses) if recorded.bytes_responses else (b"", {})
+
+    async def fake_request_multipart(method, path, *, params=None, files=None,
+                                     long_timeout=False, auth_required=True):
+        recorded.uploads.append({
+            "method": method, "path": path, "params": params,
+            "files": files, "long_timeout": long_timeout,
+        })
+        return _next(recorded.uploads_responses) if recorded.uploads_responses else {}
 
     monkeypatch.setattr(server, "_request", fake_request)
     return recorded
@@ -338,13 +378,209 @@ async def test_tasks_lists_registry_and_status(calls):
     assert "No tasks currently running" in out
 
 
-async def test_scan_library_manual_run_blocked(monkeypatch):
-    async def raise_400(*a, **kw):
-        raise RuntimeError(
-            "API error 400: {\"detail\":\"Task 'scan_library' cannot be run\"}")
-    monkeypatch.setattr(server, "_request", raise_400)
+async def test_scan_library_quick_body(calls):
+    calls.responses.append({
+        "task_key": "scan_library", "task_name": "Scan library",
+        "task_id": "abc-123", "status": "queued",
+        "created_at": "2026-01-01T00:00:00Z",
+        "enqueued_at": "2026-01-01T00:00:01Z",
+    })
     out = await server.romm_scan_library()
-    assert "refuses manually triggered" in out
+    req = calls[0]
+    assert req["method"] == "POST"
+    assert req["path"] == "tasks/scan"
+    assert req["json"] == {"type": "quick"}
+    assert "Library scan started (quick)" in out
+    assert "  task_name: Scan library" in out
+    assert 'Follow progress with romm_task_detail(task_id="abc-123").' in out
+
+
+async def test_scan_library_full_body(calls):
+    calls.responses.append({"task_id": "t-1"})
+    out = await server.romm_scan_library(full=True)
+    assert calls[0]["json"] == {"type": "full"}
+    assert "Library scan started (full)" in out
+
+
+async def test_scan_library_409_reports_scan_in_flight(calls):
+    calls.responses.append(RuntimeError("API error 409: scan already running"))
+    out = await server.romm_scan_library()
+    assert "already in progress" in out
+
+
+async def test_scan_library_503_reports_no_worker(calls):
+    calls.responses.append(RuntimeError("API error 503: no worker available"))
+    out = await server.romm_scan_library()
+    assert "task worker" in out
+
+
+async def test_scan_library_other_errors_propagate(calls):
+    calls.responses.append(RuntimeError("API error 500: boom"))
+    with pytest.raises(RuntimeError):
+        await server.romm_scan_library()
+
+
+# ── romm_task_detail ─────────────────────────────────────────────────────────
+
+# Contractual message (SEC-001): romm_task_detail rejects any id containing
+# characters outside [A-Za-z0-9._-]+ with this exact wording and never issues a
+# request. Pinned verbatim so the rejecting contract cannot drift.
+INVALID_TASK_ID_MSG = (
+    "task_id contains invalid characters. Only letters, digits, dots, "
+    "underscores and hyphens are allowed."
+)
+
+# SEC-006: a bare "." or ".." passes the charset allowlist yet httpx collapses
+# the dot segment, so romm_task_detail rejects it with this exact wording
+# (distinct from the charset message) and never issues a request.
+INVALID_TASK_ID_DOT_MSG = 'task_id must not be "." or "..".'
+
+
+async def test_task_detail_renders_full_fields(calls):
+    calls.responses.append({
+        "task_key": "scan_library", "task_name": "Scan library",
+        "task_id": "abc-123", "status": "complete",
+        "created_at": "2026-01-01T00:00:00Z",
+        "enqueued_at": "2026-01-01T00:00:01Z",
+        "started_at": "2026-01-01T00:00:02Z",
+        "ended_at": "2026-01-01T00:01:00Z",
+        "result": {"scanned": 12},
+    })
+    out = await server.romm_task_detail("abc-123")
+    assert calls[0]["method"] == "GET"
+    assert calls[0]["path"] == "tasks/abc-123"
+    assert "Task abc-123:" in out
+    assert "  task_key: scan_library" in out
+    assert "  status: complete" in out
+    assert "  started_at: 2026-01-01T00:00:02Z" in out
+    assert "  ended_at: 2026-01-01T00:01:00Z" in out
+    assert '  result: {"scanned": 12}' in out
+
+
+async def test_task_detail_omits_missing_fields(calls):
+    calls.responses.append({"task_id": "abc", "status": "running"})
+    out = await server.romm_task_detail("abc")
+    assert "  status: running" in out
+    assert "started_at" not in out
+    assert "ended_at" not in out
+    assert "result" not in out
+
+
+async def test_task_detail_lists_extra_keys_sorted(calls):
+    calls.responses.append({"task_id": "t", "zeta": 1, "alpha": 2})
+    out = await server.romm_task_detail("t")
+    assert out.index("  alpha: 2") < out.index("  zeta: 1")
+
+
+async def test_task_detail_truncates_long_result(calls):
+    calls.responses.append({"task_id": "t", "result": "x" * 600})
+    out = await server.romm_task_detail("t")
+    assert f"  result: {'x' * 500}..." in out
+    assert "x" * 501 not in out
+
+
+async def test_task_detail_blank_id_makes_no_request(calls):
+    out = await server.romm_task_detail("   ")
+    assert "task_id is required" in out
+    assert not calls
+
+
+@pytest.mark.parametrize("task_id", [
+    "1/../../users/me",
+    "x?foo=bar",
+    "a#frag",
+    "a%2e%2e",
+    "a\\b",
+    "a b",
+])
+async def test_task_detail_rejects_hostile_ids(calls, task_id):
+    # SEC-001: an id that could smuggle another path segment or query string is
+    # rejected with the contractual message and no request on any HTTP seam.
+    out = await server.romm_task_detail(task_id)
+    assert out == INVALID_TASK_ID_MSG
+    assert not calls
+    assert not calls.bytes
+    assert not calls.uploads
+
+
+async def test_task_detail_invalid_id_message_is_pinned(calls):
+    # The rejection wording is part of the contract, not an implementation
+    # detail (SEC-001): pin the exact string a caller can rely on.
+    out = await server.romm_task_detail("x?foo=bar")
+    assert out == (
+        "task_id contains invalid characters. Only letters, digits, dots, "
+        "underscores and hyphens are allowed."
+    )
+    assert not calls
+
+
+@pytest.mark.parametrize("task_id,expected_path", [
+    ("abc-123", "tasks/abc-123"),
+    ("550e8400-e29b-41d4-a716-446655440000",
+     "tasks/550e8400-e29b-41d4-a716-446655440000"),
+    ("a.b_c-1", "tasks/a.b_c-1"),
+    (42, "tasks/42"),
+])
+async def test_task_detail_valid_id_is_single_path_segment(calls, task_id,
+                                                           expected_path):
+    # Valid ids (str or int) still work and resolve to exactly one path segment
+    # with no extra segments and no query parameters (SEC-001).
+    calls.responses.append({"task_id": str(task_id), "status": "complete"})
+    out = await server.romm_task_detail(task_id)
+    assert len(calls) == 1
+    assert calls[0]["method"] == "GET"
+    assert calls[0]["path"] == expected_path
+    assert calls[0]["path"].count("/") == 1
+    assert calls[0]["params"] is None
+    assert "  status: complete" in out
+
+
+@pytest.mark.parametrize("task_id", [".", "..", " . "])
+async def test_task_detail_rejects_dot_segments(calls, task_id):
+    # SEC-006: ids composed only of dots pass the charset allowlist yet httpx
+    # collapses the dot segment ("." -> tasks/, ".." -> the parent), so they are
+    # rejected with the dot-segment message and no request on any HTTP seam.
+    out = await server.romm_task_detail(task_id)
+    assert out == INVALID_TASK_ID_DOT_MSG
+    assert not calls
+    assert not calls.bytes
+    assert not calls.uploads
+
+
+async def test_task_detail_dot_segment_message_is_pinned(calls):
+    # The dot-segment rejection wording is part of the SEC-006 contract.
+    out = await server.romm_task_detail("..")
+    assert out == 'task_id must not be "." or "..".'
+    assert not calls
+    assert not calls.bytes
+    assert not calls.uploads
+
+
+@pytest.mark.parametrize("task_id,expected_path", [
+    ("...", "tasks/..."),
+    ("abc-123", "tasks/abc-123"),
+])
+async def test_task_detail_three_dots_and_normal_id_still_request(calls, task_id,
+                                                                  expected_path):
+    # SEC-006 pins the boundary: only bare "." and ".." are rejected. Three dots
+    # ("...") and a normal id still issue exactly one GET on tasks/{id}.
+    calls.responses.append({"task_id": task_id, "status": "complete"})
+    out = await server.romm_task_detail(task_id)
+    assert len(calls) == 1
+    assert calls[0]["method"] == "GET"
+    assert calls[0]["path"] == expected_path
+    assert calls[0]["params"] is None
+    assert len(calls.bytes) == 0
+    assert len(calls.uploads) == 0
+    assert "  status: complete" in out
+
+
+async def test_task_detail_not_found(calls):
+    calls.responses.append({})
+    out = await server.romm_task_detail("abc")
+    assert "No task detail available for abc" in out
+
+
 
 
 # ── romm_get_item favorite detection ────────────────────────────────────────
