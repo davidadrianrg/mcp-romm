@@ -2252,7 +2252,16 @@ async def romm_virtual_collection_detail(virtual_id: str) -> str:
 
     virtual_id: The virtual collection's ID string (from romm_virtual_collections).
     """
-    data = await _get(f"collections/virtual/{virtual_id}")
+    # SEC-007: virtual_id was interpolated verbatim into the request path, so
+    # "1/../../users/me" reached GET /api/users/me and "x?y=z" injected query
+    # parameters. Validate it as one path segment before any request; the
+    # denylist mode keeps RomM's wider virtual-id character set working.
+    normalized, error = _validate_path_id(
+        "virtual_id", virtual_id, strict_charset=False)
+    if error:
+        return error
+
+    data = await _get(f"collections/virtual/{normalized}")
 
     if not isinstance(data, dict) or "id" not in data:
         return f"Virtual collection {virtual_id} not found."
@@ -2262,7 +2271,7 @@ async def romm_virtual_collection_detail(virtual_id: str) -> str:
 
     members = await _get(
         "roms",
-        params={"virtual_collection_id": virtual_id, "limit": 50, "offset": 0,
+        params={"virtual_collection_id": normalized, "limit": 50, "offset": 0,
                 "order_by": "name", "order_dir": "asc"},
         long_timeout=True,
     )

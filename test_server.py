@@ -584,6 +584,69 @@ async def test_task_detail_not_found(calls):
     assert "No task detail available for abc" in out
 
 
+# ── romm_virtual_collection_detail ───────────────────────────────────────────
+
+# SEC-007: virtual_id is interpolated as one URL path segment. Hostile ids that
+# could smuggle an extra path segment, query or fragment are rejected with this
+# exact wording and no request on any HTTP seam.
+INVALID_VIRTUAL_ID_MSG = "virtual_id contains invalid characters."
+
+
+@pytest.mark.parametrize("virtual_id", [
+    "1/../../users/me",
+    "x?foo=bar",
+    ".",
+    "..",
+    "a#frag",
+    "a%2e",
+    "a\\b",
+    "a b",
+    "a\tb",
+    "a\nb",
+    "a\x00b",
+    "../../users/me",
+])
+async def test_virtual_collection_detail_rejects_hostile_ids(calls, virtual_id):
+    out = await server.romm_virtual_collection_detail(virtual_id)
+    assert out == INVALID_VIRTUAL_ID_MSG
+    assert not calls
+    assert not calls.bytes
+    assert not calls.uploads
+
+
+@pytest.mark.parametrize("virtual_id", [
+    "genre:Action",
+    "abc123",
+    "genre_1",
+    "collection.2024",
+    "...",
+])
+async def test_virtual_collection_detail_valid_id_is_single_path_segment(
+        calls, virtual_id):
+    # Legitimate ids (":" is allowed by design, as are dots and underscores)
+    # still resolve to exactly one path segment with no smuggled query params.
+    calls.responses.append({"id": virtual_id, "name": "Action", "type": "genre",
+                            "rom_count": 0})
+    calls.responses.append({"items": []})
+    out = await server.romm_virtual_collection_detail(virtual_id)
+    assert len(calls) == 2
+    assert calls[0]["method"] == "GET"
+    assert calls[0]["path"] == f"collections/virtual/{virtual_id}"
+    assert calls[0]["params"] is None
+    assert calls[1]["path"] == "roms"
+    assert calls[1]["params"]["virtual_collection_id"] == virtual_id
+    assert "Action (genre)" in out
+
+
+async def test_virtual_collection_detail_blank_id_uses_pre_existing_path(calls):
+    # Pre-existing behaviour, unchanged by SEC-007 and deliberately not changed:
+    # a blank id is interpolated as-is, issuing GET collections/virtual/. Pinned
+    # so any future drift in this edge is visible.
+    out = await server.romm_virtual_collection_detail("")
+    assert len(calls) == 1
+    assert calls[0]["method"] == "GET"
+    assert calls[0]["path"] == "collections/virtual/"
+    assert "not found" in out
 
 
 # ── romm_get_item favorite detection ────────────────────────────────────────
