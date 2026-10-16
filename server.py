@@ -491,7 +491,7 @@ def _filename_from_content_disposition(value: str | None) -> str | None:
 
 
 def _validate_path_id(
-    name: str, value: object, *, strict_charset: bool
+    name: str, value: object, *, strict_charset: bool, max_len: int = 128
 ) -> tuple[str | None, str | None]:
     """Validate an id that will be interpolated as one URL path segment.
 
@@ -507,7 +507,9 @@ def _validate_path_id(
     `strict_charset=False` instead rejects a denylist of separators,
     whitespace, control characters and "%" while allowing the wider character
     set RomM virtual collection ids may use (for example ":"). In non-strict
-    mode a blank value is left to the caller's existing behaviour.
+    mode a blank value is left to the caller's existing behaviour. `max_len`
+    caps the normalized length in both modes and is checked last, after the
+    charset and dot-segment rules, so hostile input keeps its pinned message.
     """
     normalized = str(value).strip()
     if strict_charset:
@@ -522,6 +524,8 @@ def _validate_path_id(
         if strict_charset:
             return None, f'{name} must not be "." or "..".'
         return None, f"{name} contains invalid characters."
+    if len(normalized) > max_len:
+        return None, f"{name} must be at most {max_len} characters."
     return normalized, None
 
 
@@ -2229,18 +2233,19 @@ async def romm_task_detail(task_id: str | int) -> str:
     # too. _validate_path_id guarantees a single path segment (it excludes "/",
     # "\", "?", "#", "%", whitespace and control characters) so no extra
     # segment or query can be appended to the "tasks/{...}" path.
-    normalized, error = _validate_path_id("task_id", task_id, strict_charset=True)
+    normalized, error = _validate_path_id(
+        "task_id", task_id, strict_charset=True, max_len=128)
     if error:
         return error
 
     data = await _get(f"tasks/{normalized}")
 
     if not isinstance(data, dict) or not data:
-        return f"No task detail available for {task_id}."
+        return f"No task detail available for {normalized}."
 
     known = ("task_key", "task_name", "task_id", "status", "created_at",
              "enqueued_at", "started_at", "ended_at")
-    lines = [f"Task {task_id}:"]
+    lines = [f"Task {normalized}:"]
     for field in known:
         value = data.get(field)
         if value is not None:
@@ -2672,14 +2677,14 @@ async def romm_virtual_collection_detail(virtual_id: str) -> str:
     # parameters. Validate it as one path segment before any request; the
     # denylist mode keeps RomM's wider virtual-id character set working.
     normalized, error = _validate_path_id(
-        "virtual_id", virtual_id, strict_charset=False)
+        "virtual_id", virtual_id, strict_charset=False, max_len=128)
     if error:
         return error
 
     data = await _get(f"collections/virtual/{normalized}")
 
     if not isinstance(data, dict) or "id" not in data:
-        return f"Virtual collection {virtual_id} not found."
+        return f"Virtual collection {normalized} not found."
 
     name = data.get("name", "Unknown")
     rom_count = data.get("rom_count", 0)

@@ -1916,3 +1916,56 @@ async def test_notification_dismiss_rejects_negative_id(calls):
     out = await server.romm_notification_dismiss(-1)
     assert out == "notification_id must be 0 (all) or a positive ID."
     assert not calls and not calls.bytes and not calls.uploads
+
+
+# ── H1: _validate_path_id max_len ───────────────────────────────────────────
+
+
+async def test_task_detail_max_len_rejects_129(calls):
+    out = await server.romm_task_detail("a" * 129)
+    assert out == "task_id must be at most 128 characters."
+    assert not calls and not calls.bytes and not calls.uploads
+
+
+async def test_task_detail_max_len_accepts_128(calls):
+    calls.responses.append({"task_id": "a" * 128, "status": "complete"})
+    out = await server.romm_task_detail("a" * 128)
+    assert len(calls) == 1
+    assert calls[0]["method"] == "GET"
+    assert calls[0]["path"] == "tasks/" + "a" * 128
+    assert "  status: complete" in out
+
+
+async def test_virtual_collection_detail_max_len_rejects_129(calls):
+    out = await server.romm_virtual_collection_detail("a" * 129)
+    assert out == "virtual_id must be at most 128 characters."
+    assert not calls and not calls.bytes and not calls.uploads
+
+
+async def test_validate_path_id_message_precedence(calls):
+    # Charset/dot checks run before the length check, so a long hostile id keeps
+    # its charset message rather than being reported as over-length.
+    hostile = "a" * 129 + "?"
+    out = await server.romm_task_detail(hostile)
+    assert out == INVALID_TASK_ID_MSG
+    assert not calls and not calls.bytes and not calls.uploads
+
+
+# ── H2: normalized id echoed in display strings ─────────────────────────────
+
+
+async def test_task_detail_echoes_normalized_id(calls):
+    calls.responses.append({})
+    out = await server.romm_task_detail(" 42 ")
+    assert "No task detail available for 42." in out
+    assert " 42 " not in out
+    calls.responses.append({"task_id": "42", "status": "complete"})
+    out = await server.romm_task_detail(" 42 ")
+    assert "Task 42:" in out
+    assert len(calls) == 2
+
+
+async def test_virtual_collection_detail_echoes_normalized_id(calls):
+    calls.responses.append({})
+    out = await server.romm_virtual_collection_detail(" genre:Action ")
+    assert "Virtual collection genre:Action not found." in out
