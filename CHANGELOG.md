@@ -1,5 +1,39 @@
 # Changelog
 
+## 1.3.0 — 2026-10-16
+
+Save-state and save-file management plus RomM 5.x scan triggering — 13 new tools
+(53 total: 31 read + 22 write).
+
+### Added
+
+- **Save states (RomM 5.x):** `romm_states` (list by ROM or platform),
+  `romm_state_detail`, `romm_state_download`, and the write tools
+  `romm_state_upload`, `romm_state_delete`, `romm_state_favorite`,
+  `romm_state_update`.
+- **Advanced save files (RomM 5.x):** `romm_save_download`, `romm_save_upload`,
+  `romm_save_delete`, `romm_save_favorite`, `romm_save_update`.
+- **Tasks:** `romm_task_detail` — a background task's status, timing, and
+  result.
+- `romm_saves` now also filters by `slot` and `device_id`.
+- `assets.write` added to the requested OAuth scopes, for save-state and save
+  uploads, deletes, and property updates only.
+- Binary download support (`romm_state_download`, `romm_save_download`) and
+  multipart upload support (`romm_state_upload`, `romm_save_upload`), with
+  Content-Disposition filename handling, overwrite protection, and the long
+  request timeout.
+- CI now also runs on pushes to `master`.
+
+### Changed
+
+- `romm_scan_library` now triggers scans through `POST /api/tasks/scan`
+  (RomM 5.x; quick by default, or full) and reports the task execution
+  response, with clear messages when a scan is already in progress (409) or no
+  task worker is available (503).
+- Hardened id validation for `romm_task_detail` and
+  `romm_virtual_collection_detail` against path/query injection.
+- Version bumped to 1.3.0.
+
 ## 1.2.1
 
 ### Added

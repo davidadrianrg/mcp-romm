@@ -1,6 +1,6 @@
 # RomM MCP Server
 
-An [MCP](https://modelcontextprotocol.io) server for [RomM](https://github.com/rommapp/romm) — the self-hosted retro game library manager. 40 tools: 26 read-only for browsing platforms, searching ROMs, viewing metadata, collections (regular, smart, and virtual), saves, play activity, and tasks — plus 14 write tools for play status, play sessions, favorites, notes, and collection management, through any MCP-compatible AI assistant.
+An [MCP](https://modelcontextprotocol.io) server for [RomM](https://github.com/rommapp/romm) — the self-hosted retro game library manager. 53 tools: 31 read-only for browsing platforms, searching ROMs, viewing metadata, collections (regular, smart, and virtual), saves, save states, play activity, and tasks — plus 22 write tools for play status, play sessions, favorites, notes, collection management, and save states/save files (upload, delete, favorite, and metadata), through any MCP-compatible AI assistant.
 
 ## Tools
 
@@ -20,13 +20,18 @@ An [MCP](https://modelcontextprotocol.io) server for [RomM](https://github.com/r
 | `romm_collections` | List user-curated collections |
 | `romm_collection_detail` | List ROMs in a specific collection |
 | `romm_smart_collections` | List auto-generated smart collections |
-| `romm_saves` | List save files by ROM or platform |
+| `romm_saves` | List save files by ROM, platform, slot, or device |
+| `romm_states` | List save states by ROM or platform (RomM 5.x) |
+| `romm_state_detail` | Full detail for a single save state (RomM 5.x) |
+| `romm_state_download` | Download a save state to a local path (RomM 5.x) |
+| `romm_save_download` | Download a save file to a local path (RomM 5.x) |
 | `romm_user_profile` | Browse by status (now playing, backlog, completed, etc.) |
 | `romm_rom_notes` | View notes on a ROM |
 | `romm_firmware` | List BIOS/firmware files per platform |
 | `romm_devices` | List registered devices |
 | `romm_tasks` | List registered tasks (schedule, manual-run availability) and running status |
-| `romm_scan_library` | Trigger a background library rescan (blocked over REST on RomM 5.0 — see Known issues) |
+| `romm_scan_library` | Trigger a background library rescan (quick by default, or full) |
+| `romm_task_detail` | Show a background task's status, timing, and result |
 | `romm_activity` | Recent play activity feed — who played what, when (5.0+) |
 | `romm_play_sessions` | List recorded play sessions with durations (5.0+) |
 | `romm_virtual_collections` | Automatic groupings by genre/franchise/company/etc. (5.0+) |
@@ -37,7 +42,7 @@ An [MCP](https://modelcontextprotocol.io) server for [RomM](https://github.com/r
 
 ### Write
 
-These modify **your own** user data and collections. They cannot alter ROM files, platforms, firmware, other users, or save files.
+These modify **your own** user data, collections, and save states and save files (upload, delete, favorite, and metadata). They cannot alter ROM files, platforms, firmware, or other users.
 
 | Tool | Description |
 |------|-------------|
@@ -55,6 +60,14 @@ These modify **your own** user data and collections. They cannot alter ROM files
 | `romm_create_smart_collection` | Create a smart collection — a saved filter that auto-matches ROMs (5.0+) |
 | `romm_update_smart_collection` | Edit a smart collection's name/description/rules (5.0+) |
 | `romm_delete_smart_collection` | Delete a smart collection — the saved filter only (permanent, 5.0+) |
+| `romm_state_upload` | Upload a save state (RomM 5.x) |
+| `romm_state_delete` | Delete a save state (permanent) |
+| `romm_state_favorite` | Add or remove a save state from favorites |
+| `romm_state_update` | Edit a save state's labels, visibility, or file name |
+| `romm_save_upload` | Upload a save file (RomM 5.x) |
+| `romm_save_delete` | Delete a save file (permanent) |
+| `romm_save_favorite` | Add or remove a save file from favorites |
+| `romm_save_update` | Edit a save file's labels, visibility, or file name |
 
 ## Setup
 
@@ -180,10 +193,10 @@ And, with the write tools:
 
 ## Security
 
-- **Least privilege.** The OAuth2 token requests only the read scopes the tools use plus `roms.user.write`, `collections.write`, and `tasks.run`. It deliberately does **not** request `roms.write`, `platforms.write`, `firmware.write`, `assets.write`, `users.write`, or `me.write` — no tool uses them.
-- **Bounded write surface.** Write tools change only your own user data (play status, favorites, notes) and your own collections. No tool edits ROM files, platforms, firmware, other users, or uploads/deletes save files.
-- **Destructive ops are labeled.** `romm_delete_note` and `romm_delete_collection` permanently remove data and say so in their descriptions. (`romm_delete_collection` removes the grouping, not the ROMs.)
-- **No disk writes.** Credentials and tokens are held in memory only, never written to disk.
+- **Least privilege.** The OAuth2 token requests only the read scopes the tools use plus `roms.user.write`, `collections.write`, `assets.write`, and `tasks.run`. `assets.write` covers save-state and save uploads, deletes, and property updates. It deliberately does **not** request `roms.write`, `platforms.write`, `firmware.write`, `devices.write`, `users.write`, or `me.write` — no tool uses them.
+- **Bounded write surface.** Write tools change only your own user data (play status, favorites, notes), your own collections, and your own save states and save files (upload, delete, favorite, metadata). No tool edits ROM files, platforms, firmware, or other users.
+- **Destructive ops are labeled.** `romm_delete_note`, `romm_delete_collection`, `romm_delete_play_session`, `romm_delete_smart_collection`, `romm_state_delete`, and `romm_save_delete` permanently remove data and say so in their descriptions. (`romm_delete_collection` removes the grouping, not the ROMs.)
+- **Credentials stay in memory.** Credentials and tokens are never written to disk. (Files move only where you ask: the download tools write to the local `target_path` you give them, and the upload tools read the local files you point them at.)
 - **TLS by default.** Certificate verification is enabled by default (`ROMM_TLS_VERIFY=true`).
 - **Auto-retry.** If a token expires mid-session, the server re-authenticates transparently.
 
@@ -197,25 +210,43 @@ The server uses OAuth2 password grant to authenticate with RomM. Tokens are scop
 
 ## Known issues
 
-All three are RomM 5.0.0 server-side issues, found by running this server's
-live e2e suite (`smoke_test.py`) against a 5.0.0 instance:
+Server-side issues found by running this server's live e2e suite
+(`smoke_test.py`) against a RomM 5.0.0 instance. The first two were observed on
+5.0.0 and are **pending verification against 5.4** — they may or may not still
+occur there:
 
-- **`romm_filters` times out.** `GET /api/roms/filters` in RomM 5.0.0 executes
-  a query with a cartesian product (RomM's log flags it at
-  `roms_handler.py:2159`); the request hangs until the client timeout, and the
-  abandoned query keeps running server-side at high CPU. Avoid calling
-  `romm_filters` on 5.0.0 until this is fixed upstream — every call strands
-  another runaway database query.
-- **Note listing 500s once any note exists.** RomM 5.0.0's
-  `GET /api/roms/{id}/notes` fails serialization (`UserNoteSchema` validation
-  in `endpoints/roms/notes.py`) whenever the ROM has at least one note.
-  Creating and deleting notes work; `romm_rom_notes` (and the read-back after
-  `romm_add_note`) will error until fixed upstream.
-- **Library scans can't be triggered over REST.** RomM 5.0.0 flags
-  `scan_library` as `manual_run: false`, so `POST /api/tasks/run/scan_library`
-  is rejected. `romm_scan_library` reports this instead of failing; scans run
-  on the configured schedule or from the web UI.
+- **`romm_filters` times out (observed on 5.0.0; pending verification on 5.4).**
+  `GET /api/roms/filters` in RomM 5.0.0 executes a query with a cartesian
+  product (RomM's log flags it at `roms_handler.py:2159`); the request hangs
+  until the client timeout, and the abandoned query keeps running server-side
+  at high CPU. Avoid calling `romm_filters` on 5.0.0 until this is fixed
+  upstream — every call strands another runaway database query.
+- **Note listing 500s once any note exists (observed on 5.0.0; pending
+  verification on 5.4).** RomM 5.0.0's `GET /api/roms/{id}/notes` fails
+  serialization (`UserNoteSchema` validation in `endpoints/roms/notes.py`)
+  whenever the ROM has at least one note. Creating and deleting notes work;
+  `romm_rom_notes` (and the read-back after `romm_add_note`) errors on such
+  ROMs until fixed upstream.
+- **Library scan triggering — resolved in 1.3.0.** RomM 5.0.0 rejected
+  `POST /api/tasks/run/scan_library` (`scan_library` is `manual_run: false`).
+  `romm_scan_library` now triggers scans through `POST /api/tasks/scan` (a
+  quick scan by default, or a full scan with `full=true`) and reports the
+  queued task; follow it with `romm_task_detail`. The old
+  `/api/tasks/run/scan_library` path is gone.
 
 ## License
 
 MIT. See [CHANGELOG.md](CHANGELOG.md) for release history.
+
+## Fork
+
+This repository is a fork of
+[lodordev/mcp-romm](https://github.com/lodordev/mcp-romm). This fork's default
+branch is `master`; upstream's is `main`. Sync with upstream with:
+
+```bash
+git fetch upstream main && git merge upstream/main
+```
+
+Add the upstream remote once first if needed:
+`git remote add upstream https://github.com/lodordev/mcp-romm.git`.
