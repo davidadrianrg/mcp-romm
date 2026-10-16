@@ -1,10 +1,15 @@
-"""Live end-to-end test for mcp-romm — every tool against a real RomM instance.
+"""Live end-to-end test for mcp-romm — the tools against a real RomM instance.
 
-Exercises the ACTUAL server.py tool code (all 19 read tools and all 9 write
-tools) over HTTP against a live RomM. Write tests are self-cleaning: they
-operate on a throwaway collection and note, and capture-and-restore any user
-props they touch. The only lasting side effect is romm_scan_library, which
-triggers the same background quick-scan the scheduler runs.
+Exercises the ACTUAL server.py tool code over HTTP against a live RomM: 29 of
+the 31 read tools plus the self-cleaning write tools. The two read tools that
+write local files, romm_state_download and romm_save_download, are excluded by
+design here (a live harness must not drop files on the host) and are covered by
+the unit suite instead. Write tests are self-cleaning: they operate on a
+throwaway collection and note, and capture-and-restore any user props they
+touch; no save-file or save-state upload, delete, favorite or update is ever
+issued against a real instance. The only lasting side effect is
+romm_scan_library, which triggers the same background quick-scan the scheduler
+runs.
 
 A tool that raises is recorded as FAIL and the suite continues — one broken
 endpoint must not abort the run. Set ROMM_SMOKE_SKIP to a comma-separated
@@ -57,7 +62,8 @@ async def tool_out(name: str, coro) -> str | None:
 
 
 async def read_tools() -> dict:
-    """Run all 19 read tools; return context (ids) for the write tests."""
+    """Run the read tools except the two local-file download tools; return
+    context (ids) for the write tests."""
     ctx: dict = {}
 
     out = await tool_out("romm_status", server.romm_status())
@@ -147,6 +153,23 @@ async def read_tools() -> dict:
     out = await tool_out("romm_saves", server.romm_saves())
     if out is not None:
         check("romm_saves", looks_ok(out), out)
+
+    out = await tool_out("romm_states", server.romm_states(limit=5))
+    if out is not None:
+        check("romm_states", looks_ok(out), out)
+        # A state id is needed for the detail read; discover one when present.
+        states_raw = await server._get("states")
+        states = (states_raw.get("items", []) if isinstance(states_raw, dict)
+                  else states_raw)
+        if isinstance(states, list) and states:
+            sid = states[0].get("id")
+            out2 = await tool_out("romm_state_detail",
+                                  server.romm_state_detail(sid))
+            if out2 is not None:
+                check("romm_state_detail",
+                      looks_ok(out2) and f"Save state {sid}:" in out2, out2)
+        else:
+            print("SKIP  romm_state_detail - no save states discoverable")
 
     out = await tool_out("romm_user_profile (favorites)", server.romm_user_profile())
     if out is not None:
@@ -405,7 +428,8 @@ async def test_smart_collections_flow(platform_id: int) -> None:
 
 
 async def write_tools(ctx: dict) -> None:
-    """Run all 14 write tools with capture-and-restore / throwaway fixtures."""
+    """Run the 14 self-cleaning write tools with capture-and-restore /
+    throwaway fixtures."""
     await test_set_status(ctx["rom_a"])
     await test_favorite(ctx["rom_a"])
     await test_notes(ctx["rom_a"])

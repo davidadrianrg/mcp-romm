@@ -82,6 +82,8 @@ def calls(monkeypatch):
         return _next(recorded.uploads_responses) if recorded.uploads_responses else {}
 
     monkeypatch.setattr(server, "_request", fake_request)
+    monkeypatch.setattr(server, "_request_bytes", fake_request_bytes)
+    monkeypatch.setattr(server, "_request_multipart", fake_request_multipart)
     return recorded
 
 
@@ -90,16 +92,17 @@ def calls(monkeypatch):
 
 def test_scopes_request_only_needed_writes():
     scopes = set(server._DEFAULT_SCOPES.split())
-    # The two write scopes the tools actually use, plus task running.
+    # The write scopes the tools actually use, plus task running.
     assert "roms.user.write" in scopes
     assert "collections.write" in scopes
+    assert "assets.write" in scopes
     assert "tasks.run" in scopes
 
 
 def test_scopes_exclude_dangerous_writes():
     scopes = set(server._DEFAULT_SCOPES.split())
     for forbidden in ("roms.write", "platforms.write", "firmware.write",
-                      "assets.write", "users.write", "me.write", "devices.write"):
+                      "users.write", "me.write", "devices.write"):
         assert forbidden not in scopes, f"{forbidden} should not be requested"
 
 
@@ -694,3 +697,300 @@ async def test_delete_collection(calls):
     assert calls[0]["method"] == "DELETE"
     assert calls[0]["path"] == "collections/4"
     assert "Deleted collection 4" in out
+
+
+# ── romm_states ──────────────────────────────────────────────────────────────
+
+
+async def test_states_no_filters_params_empty(calls):
+    calls.responses.append([])
+    out = await server.romm_states()
+    assert calls[0]["method"] == "GET"
+    assert calls[0]["path"] == "states"
+    assert calls[0]["params"] == {}
+    assert "No save states found." in out
+
+
+async def test_states_filters_and_limit_truncation(calls):
+    calls.responses.append([
+        {"id": 9, "file_name": "slot1.state", "file_size_bytes": 2048,
+         "rom_id": 5, "platform_slug": "snes", "emulator": "retroarch",
+         "updated_at": "2026-01-01T00:00:00Z"},
+        {"id": 10, "file_name": "slot2.state", "file_size_bytes": 1024,
+         "rom_id": 5},
+    ])
+    out = await server.romm_states(rom_id=5, platform_id=2, limit=1)
+    assert calls[0]["params"] == {"rom_id": 5, "platform_id": 2}
+    assert "Save states (2):" in out
+    assert "  - slot1.state (ROM 5) [snes] [retroarch] \u2014 2 KB" in out
+    assert "    ID: 9" in out
+    assert "(1 more states not shown)" in out
+    assert "slot2.state" not in out
+
+
+async def test_states_empty_message_qualifier(calls):
+    calls.responses.append([])
+    out = await server.romm_states(rom_id=7)
+    assert "No save states found for ROM 7." in out
+
+
+async def test_states_accepts_items_dict(calls):
+    calls.responses.append({"items": [{"id": 1, "file_name": "a.state"}]})
+    out = await server.romm_states()
+    assert "  - a.state" in out
+    assert "    ID: 1" in out
+
+
+# ── romm_state_detail ────────────────────────────────────────────────────────
+
+
+async def test_state_detail_renders_fields(calls):
+    calls.responses.append({
+        "id": 9, "file_name": "slot1.state", "rom_name": "Super Metroid",
+        "rom_id": 14376, "platform_display_name": "SNES",
+        "emulator": "retroarch", "file_size_bytes": 2048,
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-02-01T00:00:00Z",
+        "is_favorite": True, "is_public": False,
+        "labels": ["speedrun", "wip"],
+    })
+    out = await server.romm_state_detail(9)
+    assert calls[0]["path"] == "states/9"
+    assert "Save state 9:" in out
+    assert "  File: slot1.state" in out
+    assert "  ROM: Super Metroid (ROM 14376)" in out
+    assert "  Platform: SNES" in out
+    assert "  Emulator: retroarch" in out
+    assert "  Size: 2 KB" in out
+    assert "  Favorite: yes" in out
+    assert "  Public: no" in out
+    assert "  Labels: speedrun, wip" in out
+    assert "  ID: 9" in out
+
+
+async def test_state_detail_not_found(calls):
+    calls.responses.append({})
+    out = await server.romm_state_detail(9)
+    assert "Save state 9 not found." in out
+
+
+# ── romm_state_download ──────────────────────────────────────────────────────
+
+
+async def test_state_download_to_explicit_file(calls, tmp_path):
+    calls.bytes_responses.append(
+        (b"BIN", {"content-disposition": 'attachment; filename="slot1.state"'}))
+    target = tmp_path / "out.state"
+    out = await server.romm_state_download(9, str(target))
+    req = calls.bytes[0]
+    assert req["method"] == "GET"
+    assert req["path"] == "states/9/content"
+    assert req["long_timeout"] is True
+    assert target.read_bytes() == b"BIN"
+    assert f"Saved save state 9 to {target} (3 B)." in out
+
+
+async def test_state_download_directory_uses_header_name(calls, tmp_path):
+    calls.bytes_responses.append(
+        (b"DATA", {"content-disposition": 'attachment; filename="slot2.state"'}))
+    out = await server.romm_state_download(9, str(tmp_path))
+    dest = tmp_path / "slot2.state"
+    assert dest.read_bytes() == b"DATA"
+    assert str(dest) in out
+
+
+async def test_state_download_falls_back_to_default_name(calls, tmp_path):
+    calls.bytes_responses.append((b"X", {}))
+    out = await server.romm_state_download(9, str(tmp_path))
+    assert (tmp_path / "state_9.bin").read_bytes() == b"X"
+    assert str(tmp_path / "state_9.bin") in out
+
+
+async def test_state_download_control_char_header_uses_default_name(calls, tmp_path):
+    # SEC-002: a NUL-smuggling Content-Disposition name is rejected by the
+    # parser, so the download falls back to state_{id}.bin and does not raise.
+    calls.bytes_responses.append(
+        (b"X", {"content-disposition": "attachment; filename*=UTF-8''a%00b.bin"}))
+    out = await server.romm_state_download(9, str(tmp_path))
+    assert (tmp_path / "state_9.bin").read_bytes() == b"X"
+    assert [p.name for p in tmp_path.iterdir()] == ["state_9.bin"]
+    assert str(tmp_path / "state_9.bin") in out
+
+
+async def test_state_download_refuses_existing_file(calls, tmp_path):
+    target = tmp_path / "keep.state"
+    target.write_bytes(b"ORIGINAL")
+    calls.bytes_responses.append((b"NEWDATA", {}))
+    out = await server.romm_state_download(9, str(target))
+    assert "File already exists" in out
+    assert "overwrite=True" in out
+    assert target.read_bytes() == b"ORIGINAL"
+
+
+async def test_state_download_overwrite_replaces(calls, tmp_path):
+    target = tmp_path / "keep.state"
+    target.write_bytes(b"OLD")
+    calls.bytes_responses.append((b"NEW", {}))
+    out = await server.romm_state_download(9, str(target), overwrite=True)
+    assert target.read_bytes() == b"NEW"
+    assert f"Saved save state 9 to {target} (3 B)." in out
+
+
+# ── _filename_from_content_disposition ───────────────────────────────────────
+
+
+@pytest.mark.parametrize("value,expected", [
+    ('attachment; filename="save.state"', "save.state"),
+    ("attachment; filename=save.state", "save.state"),
+    ("attachment; filename*=UTF-8''my%20save.state", "my save.state"),
+    ("attachment; filename=\"plain.state\"; filename*=UTF-8''star.state",
+     "star.state"),
+    ('attachment; filename="evil/../../x.state"', "x.state"),
+    ('attachment; filename="C:\\Users\\evil.state"', "evil.state"),
+    ('attachment; filename=".."', None),
+    ('attachment; filename=""', None),
+    ("attachment", None),
+    ("attachment; filename*=UTF-8''a%00b.bin", None),
+    ("attachment; filename*=UTF-8''a%01b.bin", None),
+    ("attachment; filename*=UTF-8''a%7fb.bin", None),
+    (None, None),
+])
+def test_filename_from_content_disposition(value, expected):
+    assert server._filename_from_content_disposition(value) == expected
+
+
+def test_write_download_wraps_valueerror_as_runtimeerror(tmp_path):
+    # SEC-002: a residual ValueError reaching the write (e.g. an embedded NUL
+    # in the destination) must surface as RuntimeError per the error contract,
+    # never as a raw ValueError escaping through FastMCP.
+    with pytest.raises(RuntimeError, match="Failed to write"):
+        server._write_download(b"X", {}, target_path=str(tmp_path),
+                               default_name="bad\x00name.bin")
+
+
+# ── romm_state_upload ────────────────────────────────────────────────────────
+
+
+async def test_state_upload_shaping_single_part(calls, tmp_path):
+    state_file = tmp_path / "save.state"
+    state_file.write_bytes(b"STATEBYTES")
+    calls.uploads_responses.append({"id": 42})
+    out = await server.romm_state_upload(5, str(state_file))
+    req = calls.uploads[0]
+    assert req["method"] == "POST"
+    assert req["path"] == "states"
+    assert req["params"] == {"rom_id": 5}
+    assert req["long_timeout"] is True
+    assert set(req["files"]) == {"stateFile"}
+    assert req["files"]["stateFile"] == (
+        "save.state", b"STATEBYTES", "application/octet-stream")
+    assert "Uploaded save state save.state for ROM 5 (state id: 42)." in out
+
+
+async def test_state_upload_emulator_and_screenshot(calls, tmp_path):
+    state_file = tmp_path / "save.state"
+    state_file.write_bytes(b"S")
+    shot = tmp_path / "shot.png"
+    shot.write_bytes(b"PNG")
+    calls.uploads_responses.append({"id": 7})
+    out = await server.romm_state_upload(
+        5, str(state_file), emulator="retroarch", screenshot_path=str(shot))
+    req = calls.uploads[0]
+    assert req["params"] == {"rom_id": 5, "emulator": "retroarch"}
+    assert set(req["files"]) == {"stateFile", "screenshotFile"}
+    assert req["files"]["screenshotFile"] == (
+        "shot.png", b"PNG", "application/octet-stream")
+    assert "(state id: 7)" in out
+
+
+async def test_state_upload_missing_file_makes_no_request(calls, tmp_path):
+    out = await server.romm_state_upload(5, str(tmp_path / "nope.state"))
+    assert "File not found" in out
+    assert not calls.uploads
+    assert not calls
+
+
+async def test_state_upload_missing_screenshot_makes_no_request(calls, tmp_path):
+    state_file = tmp_path / "save.state"
+    state_file.write_bytes(b"S")
+    out = await server.romm_state_upload(
+        5, str(state_file), screenshot_path=str(tmp_path / "nope.png"))
+    assert "Screenshot file not found" in out
+    assert not calls.uploads
+
+
+async def test_state_upload_rejects_bad_rom_id(calls, tmp_path):
+    state_file = tmp_path / "save.state"
+    state_file.write_bytes(b"S")
+    out = await server.romm_state_upload(0, str(state_file))
+    assert "rom_id must be positive" in out
+    assert not calls.uploads
+
+
+# ── romm_state_delete / romm_state_favorite / romm_state_update ──────────────
+
+
+async def test_state_delete_posts_ids_body(calls):
+    calls.responses.append({})
+    out = await server.romm_state_delete(9)
+    assert calls[0]["method"] == "POST"
+    assert calls[0]["path"] == "states/delete"
+    assert calls[0]["json"] == {"states": [9]}
+    assert "Deleted save state 9." in out
+
+
+def test_state_delete_docstring_is_destructive():
+    doc = server.romm_state_delete.__doc__
+    assert doc.startswith("Permanently delete")
+    assert "cannot be undone" in doc
+
+
+async def test_state_favorite_true(calls):
+    calls.responses.append({})
+    out = await server.romm_state_favorite(9)
+    assert calls[0]["method"] == "PUT"
+    assert calls[0]["path"] == "states/9/favorite"
+    assert calls[0]["json"] == {"is_favorite": True}
+    assert "Save state 9: added to favorites." in out
+
+
+async def test_state_favorite_false(calls):
+    calls.responses.append({})
+    out = await server.romm_state_favorite(9, favorite=False)
+    assert calls[0]["json"] == {"is_favorite": False}
+    assert "Save state 9: removed from favorites." in out
+
+
+async def test_state_update_single_field_sends_one_put(calls):
+    calls.responses.append({})
+    out = await server.romm_state_update(9, labels=["speedrun"])
+    assert len(calls) == 1
+    assert calls[0]["method"] == "PUT"
+    assert calls[0]["path"] == "states/9/labels"
+    assert calls[0]["json"] == {"labels": ["speedrun"]}
+    assert "Save state 9: updated labels." in out
+
+
+async def test_state_update_all_fields_in_fixed_order(calls):
+    calls.responses.extend([{}, {}, {}])
+    out = await server.romm_state_update(
+        9, labels=["a"], is_public=True, file_name="x.state")
+    assert [c["path"] for c in calls] == [
+        "states/9/labels", "states/9/visibility", "states/9/file-name"]
+    assert [c["json"] for c in calls] == [
+        {"labels": ["a"]}, {"is_public": True}, {"file_name": "x.state"}]
+    assert "Save state 9: updated labels, is_public, file_name." in out
+
+
+async def test_state_update_noop_makes_no_request(calls):
+    out = await server.romm_state_update(9)
+    assert "Nothing to update" in out
+    assert not calls
+
+
+async def test_state_update_blank_file_name_makes_no_request(calls):
+    out = await server.romm_state_update(9, file_name="   ")
+    assert "file_name must not be empty" in out
+    assert not calls
+
+

@@ -1,15 +1,16 @@
 """RomM MCP Server — browse and manage your retro game library with AI.
 
 Single-file MCP server for RomM (https://github.com/rommapp/romm).
-Provides 40 tools: 26 read-only for browsing, searching, and viewing metadata,
-plus 14 write tools for play status, play sessions, favorites, notes, and
-collections (regular and smart). Targets RomM 5.0+; most read tools degrade
+Provides 53 tools: 31 read-only for browsing, searching, and viewing metadata,
+plus 22 write tools for play status, play sessions, favorites, notes,
+collections (regular and smart), and save states/save files (upload, delete,
+favorite, and metadata). Targets RomM 5.0+; most read tools degrade
 gracefully on 4.4+ (tools marked "RomM 5.0+" need 5.0).
 
-Write tools change only your own user data (play status, favorites, notes) and
-your own collections. No tool modifies ROM files, platforms, firmware, other
-users, or uploads/deletes save files. OAuth2 password grant with automatic
-token refresh and 401 retry.
+Write tools change your own user data (play status, favorites, notes), your
+own collections, and your own save states and save files. No tool modifies ROM
+files, platforms, firmware, or other users. OAuth2 password grant with
+automatic token refresh and 401 retry.
 
 Tools:
   romm_status              — Check server configuration and reachability
@@ -23,7 +24,11 @@ Tools:
   romm_collections         — List user-curated collections
   romm_collection_detail   — List ROMs in a specific collection
   romm_smart_collections   — List auto-generated smart collections
-  romm_saves               — List save files by ROM or platform
+  romm_saves               — List save files by ROM, platform, slot, or device
+  romm_states              — List save states by ROM or platform (RomM 5.x)
+  romm_state_detail        — Full detail for a single save state (RomM 5.x)
+  romm_state_download      — Download a save state to a local path (RomM 5.x)
+  romm_save_download       — Download a save file to a local path (RomM 5.x)
   romm_user_profile        — Browse by user status (now playing, backlog, etc.)
   romm_firmware            — List BIOS/firmware files per platform
   romm_devices             — List registered devices
@@ -40,7 +45,7 @@ Tools:
   romm_whoami              — Authenticated account, role, and permissions
   romm_metadata_search     — Search metadata providers for ROM matches
 
-Write tools (modify your user data and collections):
+Write tools (modify your user data, collections, saves, and save states):
   romm_set_status          — Set play status, backlog, now-playing, rating, completion
   romm_favorite            — Add or remove a ROM from your favorites
   romm_log_play_session    — Record a play session (RomM 5.0+)
@@ -55,6 +60,14 @@ Write tools (modify your user data and collections):
   romm_create_smart_collection — Create a smart collection (saved filter)
   romm_update_smart_collection — Edit a smart collection
   romm_delete_smart_collection — Delete a smart collection (permanent)
+  romm_state_upload        — Upload a save state (RomM 5.x)
+  romm_state_delete        — Delete a save state (permanent)
+  romm_state_favorite      — Add or remove a save state from favorites
+  romm_state_update        — Edit a save state's labels/visibility/file name
+  romm_save_upload         — Upload a save file (RomM 5.x)
+  romm_save_delete         — Delete a save file (permanent)
+  romm_save_favorite       — Add or remove a save file from favorites
+  romm_save_update         — Edit a save file's labels/visibility/file name
 
 Environment variables:
   ROMM_URL              — RomM instance URL (default: http://localhost:3000)
@@ -70,11 +83,14 @@ Environment variables:
 
 Security:
   - Least privilege: the OAuth2 token requests only read scopes plus
-    roms.user.write, collections.write, and tasks.run — exactly what the tools
-    do. It cannot modify ROM files, platforms, firmware, or other users, and it
-    cannot touch save files.
+    roms.user.write, collections.write, assets.write, and tasks.run — exactly
+    what the tools do. It can now upload, delete and relabel your own save
+    states and save files, but it still cannot modify ROM files, platforms,
+    firmware, or other users.
   - Write tools that permanently destroy data (romm_delete_note,
-    romm_delete_collection) are clearly labeled as such.
+    romm_delete_collection, romm_state_delete, romm_save_delete,
+    romm_delete_play_session, romm_delete_smart_collection) are clearly
+    labeled as such.
   - Credentials are held in memory only, never written to disk.
   - TLS verification is enabled by default.
 """
@@ -86,6 +102,7 @@ import logging
 import os
 import re
 import time
+import urllib.parse
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -143,17 +160,18 @@ class _TokenState:
 
 _token = _TokenState()
 
-# Least privilege: every read scope the read tools need, plus the two write
+# Least privilege: every read scope the read tools need, plus the three write
 # scopes the write tools actually use (roms.user.write for status/favorites/
-# notes, collections.write for collections) and tasks.run for the rescan.
+# notes, collections.write for collections, assets.write for save-state and
+# save uploads/deletes/property updates) and tasks.run for the rescan.
 # Deliberately NOT requested: roms.write, platforms.write, firmware.write,
-# assets.write, users.write, me.write, devices.write — no tool uses them.
+# users.write, me.write, devices.write — no tool uses them.
 _DEFAULT_SCOPES = (
     "me.read "
     "roms.read "
     "roms.user.read roms.user.write "
     "platforms.read "
-    "assets.read "
+    "assets.read assets.write "
     "devices.read "
     "firmware.read "
     "collections.read collections.write "
@@ -229,6 +247,61 @@ async def _acquire_token() -> str:
 # ── HTTP helpers ─────────────────────────────────────────────────────────
 
 
+async def _raw_request(
+    method: str,
+    path: str,
+    *,
+    params: dict | None = None,
+    json: dict | None = None,
+    data: dict | None = None,
+    files: dict[str, tuple[str, bytes, str]] | None = None,
+    long_timeout: bool = False,
+    auth_required: bool = True,
+) -> httpx.Response:
+    """Make an HTTP request to RomM API. Handles auth and 401 retry.
+
+    Core request logic shared by the JSON, binary and multipart helpers. Use
+    `json` for JSON bodies, `data` for url-encoded form fields (RomM's
+    collection-create endpoint takes Form fields rather than JSON) and `files`
+    for multipart uploads. `files` is mutually exclusive with `json`/`data`.
+    Returns the raw httpx response.
+    """
+    client = _get_client()
+    url = f"{cfg.romm_url}/api/{path.lstrip('/')}"
+    req_timeout = cfg.request_timeout_long if long_timeout else cfg.request_timeout
+
+    headers: dict[str, str] = {}
+    if auth_required:
+        token = await _acquire_token()
+        headers["Authorization"] = f"Bearer {token}"
+
+    try:
+        resp = await client.request(
+            method, url, headers=headers, params=params, json=json, data=data,
+            files=files, timeout=req_timeout,
+        )
+
+        if resp.status_code == 401 and auth_required:
+            _token.access_token = ""
+            token = await _acquire_token()
+            headers["Authorization"] = f"Bearer {token}"
+            resp = await client.request(
+                method, url, headers=headers, params=params, json=json, data=data,
+                files=files, timeout=req_timeout,
+            )
+
+        resp.raise_for_status()
+        return resp
+    except httpx.HTTPStatusError as e:
+        raise RuntimeError(f"API error {e.response.status_code}: {e.response.text[:200]}")
+    except httpx.TimeoutException:
+        raise RuntimeError(f"Request timed out after {req_timeout}s")
+    except RuntimeError:
+        raise
+    except Exception as e:
+        raise RuntimeError(f"Request failed: {e}")
+
+
 async def _request(
     method: str,
     path: str,
@@ -244,45 +317,72 @@ async def _request(
     Use `json` for JSON bodies, `data` for url-encoded form fields (RomM's
     collection-create endpoint takes Form fields rather than JSON).
     """
-    client = _get_client()
-    url = f"{cfg.romm_url}/api/{path.lstrip('/')}"
-    req_timeout = cfg.request_timeout_long if long_timeout else cfg.request_timeout
+    resp = await _raw_request(
+        method, path, params=params, json=json, data=data,
+        long_timeout=long_timeout, auth_required=auth_required,
+    )
+    return _coerce_response(resp)
 
-    headers: dict[str, str] = {}
-    if auth_required:
-        token = await _acquire_token()
-        headers["Authorization"] = f"Bearer {token}"
 
+def _coerce_response(resp: httpx.Response) -> dict | list:
+    """Coerce a raw response body the way the JSON helpers always have.
+
+    204/empty -> {}; non-JSON content-type -> {"_text": ...}; JSON -> parsed.
+    A malformed JSON body is surfaced as the usual RuntimeError.
+    """
+    if resp.status_code == 204 or not resp.text:
+        return {}
+    ct = resp.headers.get("content-type", "")
+    if "json" not in ct:
+        return {"_text": resp.text}
     try:
-        resp = await client.request(
-            method, url, headers=headers, params=params, json=json, data=data,
-            timeout=req_timeout,
-        )
-
-        if resp.status_code == 401 and auth_required:
-            _token.access_token = ""
-            token = await _acquire_token()
-            headers["Authorization"] = f"Bearer {token}"
-            resp = await client.request(
-                method, url, headers=headers, params=params, json=json, data=data,
-                timeout=req_timeout,
-            )
-
-        resp.raise_for_status()
-        if resp.status_code == 204 or not resp.text:
-            return {}
-        ct = resp.headers.get("content-type", "")
-        if "json" not in ct:
-            return {"_text": resp.text}
         return resp.json()
-    except httpx.HTTPStatusError as e:
-        raise RuntimeError(f"API error {e.response.status_code}: {e.response.text[:200]}")
-    except httpx.TimeoutException:
-        raise RuntimeError(f"Request timed out after {req_timeout}s")
-    except RuntimeError:
-        raise
-    except Exception as e:
+    except ValueError as e:
         raise RuntimeError(f"Request failed: {e}")
+
+
+async def _request_bytes(
+    method: str,
+    path: str,
+    *,
+    params: dict | None = None,
+    long_timeout: bool = False,
+    auth_required: bool = True,
+) -> tuple[bytes, dict[str, str]]:
+    """Make a request and return the raw body plus lowercased response headers.
+
+    For binary endpoints such as states/{id}/content and saves/{id}/content,
+    where the body is not JSON. Never coerces the body to text or JSON.
+    """
+    resp = await _raw_request(
+        method, path, params=params, long_timeout=long_timeout,
+        auth_required=auth_required,
+    )
+    headers = {key.lower(): value for key, value in resp.headers.items()}
+    return resp.content, headers
+
+
+async def _request_multipart(
+    method: str,
+    path: str,
+    *,
+    params: dict | None = None,
+    files: dict[str, tuple[str, bytes, str]] | None = None,
+    long_timeout: bool = False,
+    auth_required: bool = True,
+) -> dict | list:
+    """Make a multipart/form-data request with upload metadata in query params.
+
+    `files` maps a multipart field name to (filename, content_bytes,
+    content_type). RomM reads upload metadata (rom_id, emulator, slot,
+    overwrite) from the query string, so it always travels in `params`. The
+    file parts are in-memory bytes, so the 401 retry can safely re-send them.
+    """
+    resp = await _raw_request(
+        method, path, params=params, files=files,
+        long_timeout=long_timeout, auth_required=auth_required,
+    )
+    return _coerce_response(resp)
 
 
 async def _get(path: str, *, params: dict | None = None, long_timeout: bool = False,
@@ -348,6 +448,47 @@ def _fmt_rom_line(rom: dict, index: int = 0) -> list[str]:
     lines.append(f"   ID: {rom_id}")
     lines.append("")
     return lines
+
+
+def _filename_from_content_disposition(value: str | None) -> str | None:
+    """Extract a safe bare filename from a Content-Disposition header value.
+
+    Supports quoted and bare `filename=` plus RFC 5987 `filename*=`, preferring
+    the latter. The result is reduced to its basename so a hostile server
+    header cannot traverse out of the target directory. Returns None when no
+    usable name is present. Never raises.
+    """
+    if not value:
+        return None
+    star: str | None = None
+    plain: str | None = None
+    for part in value.split(";"):
+        part = part.strip()
+        low = part.lower()
+        # RFC 5987 extended form: filename*=UTF-8''some%20name.bin
+        if star is None and low.startswith("filename*="):
+            raw = part[len("filename*="):].strip()
+            if "''" in raw:
+                raw = raw.split("''", 1)[1]
+            star = urllib.parse.unquote(raw)
+        elif plain is None and low.startswith("filename="):
+            plain = part[len("filename="):].strip().strip('"')
+    name = star if star else plain
+    if not name:
+        return None
+    # Normalise separators first so Windows-style paths also reduce to a base.
+    name = os.path.basename(name.replace("\\", "/"))
+    if name in ("", ".", ".."):
+        return None
+    # Reject control characters (including NUL). A NUL in particular makes
+    # open() raise ValueError, which is outside the {FileExistsError,
+    # RuntimeError} contract of _write_download; such a name falls back to the
+    # default name instead.
+    if re.search(r"[\x00-\x1f\x7f]", name):
+        return None
+    return name
+
+
 def _validate_path_id(
     name: str, value: object, *, strict_charset: bool
 ) -> tuple[str | None, str | None]:
@@ -383,6 +524,80 @@ def _validate_path_id(
     return normalized, None
 
 
+def _write_download(
+    content: bytes,
+    headers: dict[str, str],
+    *,
+    target_path: str,
+    default_name: str,
+    overwrite: bool = False,
+) -> tuple[str, int]:
+    """Write downloaded bytes to `target_path`, returning (absolute path, size).
+
+    `target_path` is treated as a directory when it is an existing directory or
+    ends with a separator; in that case the filename comes from the
+    Content-Disposition header, falling back to `default_name`. Parent
+    directories are created as needed. Raises FileExistsError *before* writing
+    when the destination exists and `overwrite` is False; wraps other OSError
+    as RuntimeError.
+    """
+    dest = os.path.abspath(os.path.expanduser(target_path))
+    is_dir_target = os.path.isdir(dest) or target_path.endswith(("/", os.sep))
+    if is_dir_target:
+        name = (_filename_from_content_disposition(headers.get("content-disposition"))
+                or default_name)
+        dest = os.path.join(dest, name)
+    if os.path.exists(dest) and not overwrite:
+        raise FileExistsError(dest)
+    parent = os.path.dirname(dest)
+    try:
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(dest, "wb") as fh:
+            fh.write(content)
+    except (OSError, ValueError) as e:
+        raise RuntimeError(f"Failed to write {dest}: {e}")
+    return dest, len(content)
+
+
+def _read_file_bytes(path: str) -> bytes:
+    """Read a local file fully into memory.
+
+    Reading ahead of the request (rather than passing an open handle) keeps the
+    upload body re-sendable when the 401 retry re-issues the request.
+    """
+    with open(path, "rb") as fh:
+        return fh.read()
+
+
+async def _put_asset_props(
+    asset_kind: str,
+    asset_id: int,
+    *,
+    labels: list[str] | None = None,
+    is_public: bool | None = None,
+    file_name: str | None = None,
+) -> list[str]:
+    """Update save-state/save properties, sending only the fields given.
+
+    `asset_kind` must be "states" or "saves". Each property has its own RomM
+    endpoint; labels, visibility and file-name are updated in that fixed order
+    and only when the matching argument is not None. Returns the changed field
+    names in the same order.
+    """
+    if asset_kind not in ("states", "saves"):
+        raise ValueError(f"unsupported asset kind: {asset_kind}")
+    changed: list[str] = []
+    if labels is not None:
+        await _put(f"{asset_kind}/{asset_id}/labels", {"labels": labels})
+        changed.append("labels")
+    if is_public is not None:
+        await _put(f"{asset_kind}/{asset_id}/visibility", {"is_public": is_public})
+        changed.append("is_public")
+    if file_name is not None:
+        await _put(f"{asset_kind}/{asset_id}/file-name", {"file_name": file_name})
+        changed.append("file_name")
+    return changed
 
 
 # ── Tools — Status & Stats ──────────────────────────────────────────────
@@ -1068,6 +1283,218 @@ async def romm_rom_notes(rom_id: int) -> str:
         lines.append("")
 
     return "\n".join(lines)
+
+
+# ── Tools — Save states (RomM 5.x) ───────────────────────────────────────
+
+
+@mcp.tool()
+async def romm_states(rom_id: int = 0, platform_id: int = 0, limit: int = 50) -> str:
+    """List save states. Filter by ROM or platform.
+
+    rom_id: Filter to a specific ROM (0 = all).
+    platform_id: Filter to a specific platform (0 = all).
+    limit: Max states shown (default 50, max 200).
+    """
+    params: dict = {}
+    if rom_id:
+        params["rom_id"] = rom_id
+    if platform_id:
+        params["platform_id"] = platform_id
+
+    data = await _get("states", params=params)
+
+    items = data.get("items", []) if isinstance(data, dict) else data
+    if not isinstance(items, list) or not items:
+        qualifier = ""
+        if rom_id:
+            qualifier += f" for ROM {rom_id}"
+        if platform_id:
+            qualifier += f" on platform {platform_id}"
+        return f"No save states found{qualifier}."
+
+    n = max(1, min(limit, 200))
+    lines = [f"Save states ({len(items)}):\n"]
+    for s in items[:n]:
+        fname = s.get("file_name", "?")
+        size = s.get("file_size_bytes", 0)
+        rom_name = s.get("rom_name", "")
+        platform = s.get("platform_slug", "")
+        emulator = s.get("emulator", "")
+        srom_id = s.get("rom_id")
+        updated = s.get("updated_at", "")
+
+        line = f"  - {fname}"
+        if rom_name:
+            line += f" ({rom_name})"
+        elif srom_id:
+            line += f" (ROM {srom_id})"
+        if platform:
+            line += f" [{platform}]"
+        if emulator:
+            line += f" [{emulator}]"
+        if size:
+            line += f" — {_fmt_size(size)}"
+        lines.append(line)
+        if updated:
+            lines.append(f"    Updated: {updated}")
+        lines.append(f"    ID: {s.get('id', '?')}")
+
+    if len(items) > n:
+        lines.append(f"\n  ({len(items) - n} more states not shown)")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def romm_state_detail(state_id: int) -> str:
+    """Show full detail for a single save state.
+
+    state_id: The save state's ID (from romm_states).
+    """
+    data = await _get(f"states/{state_id}")
+
+    if not isinstance(data, dict) or "id" not in data:
+        return f"Save state {state_id} not found."
+
+    lines = [f"Save state {state_id}:"]
+    if data.get("file_name"):
+        lines.append(f"  File: {data['file_name']}")
+    rom_name = data.get("rom_name")
+    rom_id = data.get("rom_id")
+    if rom_name:
+        lines.append(f"  ROM: {rom_name} (ROM {rom_id})" if rom_id
+                     else f"  ROM: {rom_name}")
+    elif rom_id:
+        lines.append(f"  ROM: {rom_id}")
+    platform = data.get("platform_display_name") or data.get("platform_slug")
+    if platform:
+        lines.append(f"  Platform: {platform}")
+    if data.get("emulator"):
+        lines.append(f"  Emulator: {data['emulator']}")
+    if data.get("file_size_bytes"):
+        lines.append(f"  Size: {_fmt_size(data['file_size_bytes'])}")
+    if data.get("created_at"):
+        lines.append(f"  Created: {data['created_at']}")
+    if data.get("updated_at"):
+        lines.append(f"  Updated: {data['updated_at']}")
+    if data.get("is_favorite") is not None:
+        lines.append(f"  Favorite: {'yes' if data['is_favorite'] else 'no'}")
+    if data.get("is_public") is not None:
+        lines.append(f"  Public: {'yes' if data['is_public'] else 'no'}")
+    labels = data.get("labels")
+    if labels:
+        lines.append(f"  Labels: {', '.join(str(label) for label in labels)}")
+    lines.append(f"  ID: {data['id']}")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def romm_state_download(state_id: int, target_path: str,
+                              overwrite: bool = False) -> str:
+    """Download a save state to a local path.
+
+    state_id: The save state's ID (from romm_states).
+    target_path: Destination file or directory. A directory (an existing one,
+                 or a path ending in a separator) keeps RomM's suggested name.
+    overwrite: Replace an existing file (default: false).
+    """
+    content, headers = await _request_bytes(
+        "GET", f"states/{state_id}/content", long_timeout=True,
+    )
+    try:
+        dest, size = _write_download(
+            content, headers, target_path=target_path,
+            default_name=f"state_{state_id}.bin", overwrite=overwrite,
+        )
+    except FileExistsError as e:
+        return f"File already exists: {e} (use overwrite=True to replace it)."
+    return f"Saved save state {state_id} to {dest} ({_fmt_size(size)})."
+
+
+@mcp.tool()
+async def romm_state_upload(rom_id: int, file_path: str, emulator: str = "",
+                            screenshot_path: str = "") -> str:
+    """Upload a save state to RomM. Requires the assets.write scope.
+
+    rom_id: The ROM the save state belongs to.
+    file_path: Path to the local save state file to upload.
+    emulator: Optional emulator name to record alongside the state.
+    screenshot_path: Optional local screenshot to attach to the state.
+    """
+    if rom_id <= 0:
+        return "rom_id must be positive."
+    if not os.path.isfile(file_path):
+        return f"File not found: {file_path}."
+    if screenshot_path and not os.path.isfile(screenshot_path):
+        return f"Screenshot file not found: {screenshot_path}."
+
+    params: dict = {"rom_id": rom_id}
+    if emulator:
+        params["emulator"] = emulator
+
+    file_bytes = _read_file_bytes(file_path)
+    files: dict[str, tuple[str, bytes, str]] = {
+        "stateFile": (os.path.basename(file_path), file_bytes, "application/octet-stream"),
+    }
+    if screenshot_path:
+        shot_bytes = _read_file_bytes(screenshot_path)
+        files["screenshotFile"] = (
+            os.path.basename(screenshot_path), shot_bytes, "application/octet-stream")
+
+    data = await _request_multipart(
+        "POST", "states", params=params, files=files, long_timeout=True,
+    )
+    state_id = data.get("id", "?") if isinstance(data, dict) else "?"
+    return (f"Uploaded save state {os.path.basename(file_path)} for ROM {rom_id} "
+            f"(state id: {state_id}).")
+
+
+@mcp.tool()
+async def romm_state_delete(state_id: int) -> str:
+    """Permanently delete a save state. This cannot be undone.
+
+    state_id: The save state's ID (from romm_states).
+    """
+    await _post("states/delete", {"states": [state_id]})
+    return f"Deleted save state {state_id}."
+
+
+@mcp.tool()
+async def romm_state_favorite(state_id: int, favorite: bool = True) -> str:
+    """Add or remove a save state from your favorites.
+
+    state_id: The save state's ID.
+    favorite: True to favorite (default), False to unfavorite.
+    """
+    await _put(f"states/{state_id}/favorite", {"is_favorite": favorite})
+    if favorite:
+        return f"Save state {state_id}: added to favorites."
+    return f"Save state {state_id}: removed from favorites."
+
+
+@mcp.tool()
+async def romm_state_update(state_id: int, labels: list[str] | None = None,
+                            is_public: bool | None = None,
+                            file_name: str | None = None) -> str:
+    """Update a save state's metadata. Only the fields you provide are changed.
+
+    state_id: The save state's ID (from romm_states).
+    labels: New label list (omit to leave unchanged).
+    is_public: New visibility (omit to leave unchanged).
+    file_name: New file name (omit to leave unchanged; must not be empty).
+    """
+    if file_name is not None and not file_name.strip():
+        return "file_name must not be empty."
+    if labels is None and is_public is None and file_name is None:
+        return "Nothing to update — provide at least one field to change."
+    changed = await _put_asset_props(
+        "states", state_id, labels=labels, is_public=is_public, file_name=file_name,
+    )
+    return f"Save state {state_id}: updated {', '.join(changed)}."
+
+
 
 
 # ── Tools — Firmware & Devices ───────────────────────────────────────────
