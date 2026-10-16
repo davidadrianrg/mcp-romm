@@ -22,7 +22,8 @@ Server-side metadata exports, memory cards, recommendations and notifications â€
   `romm_similar_roms` â€” each showing the game, its score, and the reasons.
 - **Notifications (RomM 5.0+):** `romm_notifications` (newest first),
   `romm_notify`, `romm_notifications_read` (all, or specific IDs), and
-  `romm_notification_dismiss` (one, or all with id 0).
+  `romm_notification_dismiss` (one by ID, or all with an explicit
+  dismiss_all=True).
 - `platforms.write` (the two server-side exports) and `me.write` (your own
   notifications) added to the requested OAuth scopes; the scope set is
   otherwise unchanged.

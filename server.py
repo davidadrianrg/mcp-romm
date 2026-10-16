@@ -3066,22 +3066,28 @@ async def romm_notifications_read(ids: list[int] | None = None) -> str:
 
 
 @mcp.tool()
-async def romm_notification_dismiss(notification_id: int = 0) -> str:
+async def romm_notification_dismiss(notification_id: int = 0,
+                                    dismiss_all: bool = False) -> str:
     """Permanently dismiss notifications. This cannot be undone.
 
-    With the default id 0 this dismisses ALL of your notifications; a positive
-    id dismisses just that one.
+    Pass a positive notification_id to dismiss just that one. Dismissing ALL
+    of your notifications requires dismiss_all=True explicitly, so a call that
+    forgot the id cannot wipe the list by accident.
 
-    notification_id: The notification's ID, or 0 to dismiss all (default: 0).
+    notification_id: The notification's ID (from romm_notifications).
+    dismiss_all: Dismiss ALL notifications (destructive; default: false).
     """
     if notification_id < 0:
-        return "notification_id must be 0 (all) or a positive ID."
+        return "notification_id must be a positive ID or 0 with dismiss_all=True."
 
-    if notification_id == 0:
-        await _delete("notifications")
-        return "Dismissed all notifications."
-    await _delete(f"notifications/{notification_id}")
-    return f"Dismissed notification {notification_id}."
+    if notification_id:
+        await _delete(f"notifications/{notification_id}")
+        return f"Dismissed notification {notification_id}."
+    if not dismiss_all:
+        return ("Nothing dismissed: pass the notification_id to dismiss one, or "
+                "dismiss_all=True to dismiss ALL of your notifications.")
+    await _delete("notifications")
+    return "Dismissed all notifications."
 
 
 def _transport_config() -> tuple[str, dict]:

@@ -83,7 +83,7 @@ These modify **your own** user data, collections, notifications, and save states
 | `romm_memory_card_delete` | Delete your own memory card (permanent, RomM 5.x) |
 | `romm_notify` | Create a notification for yourself (RomM 5.0+) |
 | `romm_notifications_read` | Mark your own notifications as read — all, or specific IDs (RomM 5.0+) |
-| `romm_notification_dismiss` | Dismiss your own notifications — one, or all with id 0 (permanent, RomM 5.0+) |
+| `romm_notification_dismiss` | Dismiss your own notifications — one by ID, or all with dismiss_all=True (permanent, RomM 5.0+) |
 
 ## Setup
 
@@ -211,7 +211,7 @@ And, with the write tools:
 
 - **Least privilege.** The OAuth2 token requests only the read scopes the tools use plus the write scopes those tools actually need: `roms.user.write` (play status, favorites, notes), `collections.write` (regular and smart collections), `assets.write` (save-state, save-file and memory-card uploads, deletes, and property updates), `platforms.write` (the two server-side metadata exports), `me.write` (your own notifications), and `tasks.run` (the library rescan). It deliberately does **not** request `roms.write`, `firmware.write`, `users.write`, or `devices.write` — no tool uses them.
 - **Bounded write surface.** Write tools change only your own user data (play status, favorites, notes), your own collections, your own save states, save files and memory cards (upload, delete, favorite, metadata), and your own notifications. The two export tools (`romm_export_gamelist`, `romm_export_pegasus`) write `gamelist.xml` / `metadata.pegasus.txt` **inside the platform directories on the RomM server** and download nothing to the client. No tool edits ROM files, firmware, or other users.
-- **Destructive ops are labeled.** `romm_delete_note`, `romm_delete_collection`, `romm_delete_play_session`, `romm_delete_smart_collection`, `romm_state_delete`, `romm_save_delete`, `romm_memory_card_delete`, and `romm_notification_dismiss` permanently remove data and say so in their descriptions. (`romm_delete_collection` removes the grouping, not the ROMs; `romm_notification_dismiss` with id 0 removes all of your notifications.)
+- **Destructive ops are labeled.** `romm_delete_note`, `romm_delete_collection`, `romm_delete_play_session`, `romm_delete_smart_collection`, `romm_state_delete`, `romm_save_delete`, `romm_memory_card_delete`, and `romm_notification_dismiss` permanently remove data and say so in their descriptions. (`romm_delete_collection` removes the grouping, not the ROMs; `romm_notification_dismiss` removes all of your notifications only with an explicit dismiss_all=True.)
 - **Credentials stay in memory.** Credentials and tokens are never written to disk. (Files move only where you ask: the download tools write to the local `target_path` you give them, and the upload tools read the local files you point them at.)
 - **TLS by default.** Certificate verification is enabled by default (`ROMM_TLS_VERIFY=true`).
 - **Auto-retry.** If a token expires mid-session, the server re-authenticates transparently.

@@ -1890,11 +1890,18 @@ async def test_notifications_read_rejects_non_positive_ids(calls):
 
 async def test_notification_dismiss_all(calls):
     calls.responses.append({})
-    out = await server.romm_notification_dismiss()
+    out = await server.romm_notification_dismiss(dismiss_all=True)
     assert calls[0]["method"] == "DELETE"
     assert calls[0]["path"] == "notifications"
     assert calls[0]["json"] is None
     assert out == "Dismissed all notifications."
+
+
+async def test_notification_dismiss_bare_call_refuses(calls):
+    out = await server.romm_notification_dismiss()
+    assert out.startswith("Nothing dismissed")
+    assert "dismiss_all=True" in out
+    assert not calls and not calls.bytes and not calls.uploads
 
 
 async def test_notification_dismiss_one(calls):
@@ -1914,7 +1921,7 @@ def test_notification_dismiss_docstring_is_destructive():
 
 async def test_notification_dismiss_rejects_negative_id(calls):
     out = await server.romm_notification_dismiss(-1)
-    assert out == "notification_id must be 0 (all) or a positive ID."
+    assert out == "notification_id must be a positive ID or 0 with dismiss_all=True."
     assert not calls and not calls.bytes and not calls.uploads
 
 
