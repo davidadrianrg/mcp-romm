@@ -1037,6 +1037,111 @@ async def romm_filters() -> str:
     return "\n".join(lines)
 
 
+# ── Tools — Recommendations (RomM 5.x) ──────────────────────────────────
+
+
+@mcp.tool()
+async def romm_recommendations(limit: int = 20, refresh: bool = False) -> str:
+    """Personalized ROM recommendations based on your play history (RomM 5.x).
+
+    limit: Number of recommendations (default 20, clamped to 1-50).
+    refresh: Ask RomM to recompute recommendations before returning (default: false).
+    """
+    n = min(max(limit, 1), 50)
+    params: dict = {"limit": n}
+    if refresh:
+        params["refresh"] = True
+
+    data = await _get("recommendations", params=params)
+
+    items = data.get("items", []) if isinstance(data, dict) else data
+    if not isinstance(items, list) or not items:
+        return "No recommendations available."
+
+    lines = [f"Recommendations ({len(items)}):\n"]
+    for i, item in enumerate(items[:n], 1):
+        rom = item.get("rom") if isinstance(item.get("rom"), dict) else item
+        row = _fmt_rom_line(rom, i)
+        if row and row[-1] == "":
+            row = row[:-1]
+        score = item.get("score")
+        if score is not None:
+            row.append(f"   Score: {score}")
+        reasons = item.get("reasons") or []
+        if reasons:
+            text = "; ".join(str(r) for r in reasons) if isinstance(reasons, list) else str(reasons)
+            row.append(f"   Reasons: {text}")
+        row.append("")
+        lines.extend(row)
+
+    if len(items) > n:
+        lines.append(f"\n  ({len(items) - n} more not shown)")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def romm_random_rom(platform_id: int = 0) -> str:
+    """Pick a random ROM from your library (RomM 5.x).
+
+    platform_id: Restrict to a single platform (0 = all platforms).
+    """
+    if platform_id < 0:
+        return "platform_id must be 0 (all) or a positive ID."
+
+    params: dict = {}
+    if platform_id > 0:
+        params["platform_ids"] = [platform_id]
+
+    data = await _get("roms/random", params=params)
+
+    if not isinstance(data, dict) or not data:
+        return "No random ROM found (no candidates)."
+
+    lines = ["Random pick:"]
+    lines.extend(_fmt_rom_line(data))
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def romm_similar_roms(rom_id: int, limit: int = 12) -> str:
+    """List ROMs similar to a given ROM (RomM 5.x).
+
+    rom_id: The ROM's ID (from romm_library_items or romm_search).
+    limit: Number of similar ROMs (default 12, clamped to 1-50).
+    """
+    if rom_id <= 0:
+        return "rom_id must be positive."
+
+    n = min(max(limit, 1), 50)
+    data = await _get(f"roms/{rom_id}/similar", params={"limit": n})
+
+    items = data.get("items", []) if isinstance(data, dict) else data
+    if not isinstance(items, list) or not items:
+        return f"No similar ROMs found for ROM {rom_id}."
+
+    lines = [f"Similar ROMs for ROM {rom_id} ({len(items)}):\n"]
+    for i, item in enumerate(items[:n], 1):
+        rom = item.get("rom") if isinstance(item.get("rom"), dict) else item
+        row = _fmt_rom_line(rom, i)
+        if row and row[-1] == "":
+            row = row[:-1]
+        score = item.get("score")
+        if score is not None:
+            row.append(f"   Score: {score}")
+        reasons = item.get("reasons") or []
+        if reasons:
+            text = "; ".join(str(r) for r in reasons) if isinstance(reasons, list) else str(reasons)
+            row.append(f"   Reasons: {text}")
+        row.append("")
+        lines.extend(row)
+
+    if len(items) > n:
+        lines.append(f"\n  ({len(items) - n} more not shown)")
+
+    return "\n".join(lines)
+
+
 # ── Tools — Collections ─────────────────────────────────────────────────
 
 

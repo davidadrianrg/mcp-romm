@@ -1628,3 +1628,131 @@ async def test_memory_card_delete_rejects_bad_id(calls):
     out = await server.romm_memory_card_delete(0)
     assert out == CARD_ID_MSG
     assert not calls
+
+
+# ── romm_recommendations / romm_random_rom / romm_similar_roms ──────────────
+
+
+async def test_recommendations_shaping_default(calls):
+    calls.responses.append([])
+    await server.romm_recommendations()
+    req = calls[0]
+    assert req["method"] == "GET"
+    assert req["path"] == "recommendations"
+    assert req["params"] == {"limit": 20}
+    assert "refresh" not in req["params"]
+
+
+async def test_recommendations_refresh_flag(calls):
+    calls.responses.append([])
+    await server.romm_recommendations(refresh=True)
+    assert calls[0]["params"] == {"limit": 20, "refresh": True}
+
+
+async def test_recommendations_limit_clamped(calls):
+    # Clamp, not reject (consistent with romm_states/romm_play_sessions).
+    calls.responses.extend([[], []])
+    await server.romm_recommendations(limit=0)
+    await server.romm_recommendations(limit=999)
+    assert calls[0]["params"] == {"limit": 1}
+    assert calls[1]["params"] == {"limit": 50}
+
+
+async def test_recommendations_rows_show_game_score_reasons(calls):
+    calls.responses.append([
+        {"rom": {"id": 5, "name": "Super Metroid", "platform_slug": "snes"},
+         "score": 0.91, "reasons": ["a", "b"]},
+    ])
+    out = await server.romm_recommendations()
+    assert "Recommendations (1):" in out
+    assert "Super Metroid" in out
+    assert "Score: 0.91" in out
+    assert "Reasons: a; b" in out
+
+
+async def test_recommendations_flat_item_shape(calls):
+    calls.responses.append(
+        [{"id": 5, "name": "Flat ROM", "platform_slug": "snes"}])
+    out = await server.romm_recommendations()
+    assert "Flat ROM" in out
+    assert "   ID: 5" in out
+
+
+async def test_recommendations_empty(calls):
+    calls.responses.append([])
+    out = await server.romm_recommendations()
+    assert out == "No recommendations available."
+
+
+async def test_random_rom_default_no_params(calls):
+    calls.responses.append({"id": 5, "name": "R"})
+    await server.romm_random_rom()
+    assert calls[0]["method"] == "GET"
+    assert calls[0]["path"] == "roms/random"
+    assert calls[0]["params"] == {}
+
+
+async def test_random_rom_platform_filter(calls):
+    calls.responses.append({"id": 5, "name": "R"})
+    await server.romm_random_rom(platform_id=5)
+    assert calls[0]["params"] == {"platform_ids": [5]}
+
+
+async def test_random_rom_null_response(calls):
+    calls.responses.extend([None, {}])
+    assert await server.romm_random_rom() == "No random ROM found (no candidates)."
+    assert await server.romm_random_rom() == "No random ROM found (no candidates)."
+
+
+async def test_random_rom_rejects_negative_platform_id(calls):
+    out = await server.romm_random_rom(platform_id=-1)
+    assert out == "platform_id must be 0 (all) or a positive ID."
+    assert not calls and not calls.bytes and not calls.uploads
+
+
+async def test_random_rom_renders_rom_line(calls):
+    calls.responses.append(
+        {"id": 5, "name": "Chrono Trigger", "platform_slug": "snes"})
+    out = await server.romm_random_rom()
+    assert "Random pick:" in out
+    assert "Chrono Trigger" in out
+    assert "   ID: 5" in out
+
+
+async def test_similar_roms_shaping(calls):
+    calls.responses.append([])
+    await server.romm_similar_roms(42)
+    req = calls[0]
+    assert req["method"] == "GET"
+    assert req["path"] == "roms/42/similar"
+    assert req["params"] == {"limit": 12}
+
+
+async def test_similar_roms_limit_clamped(calls):
+    calls.responses.append([])
+    await server.romm_similar_roms(42, limit=999)
+    assert calls[0]["params"] == {"limit": 50}
+
+
+async def test_similar_roms_rows_show_game_score_reasons(calls):
+    calls.responses.append([
+        {"rom": {"id": 9, "name": "Earthbound", "platform_slug": "snes"},
+         "score": 0.77, "reasons": ["same genre"]},
+    ])
+    out = await server.romm_similar_roms(42)
+    assert "Similar ROMs for ROM 42 (1):" in out
+    assert "Earthbound" in out
+    assert "Score: 0.77" in out
+    assert "Reasons: same genre" in out
+
+
+async def test_similar_roms_empty(calls):
+    calls.responses.append([])
+    out = await server.romm_similar_roms(42)
+    assert out == "No similar ROMs found for ROM 42."
+
+
+async def test_similar_roms_rejects_bad_rom_id(calls):
+    out = await server.romm_similar_roms(0)
+    assert out == "rom_id must be positive."
+    assert not calls
