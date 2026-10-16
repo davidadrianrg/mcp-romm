@@ -684,7 +684,10 @@ async def romm_status() -> str:
     """Check RomM MCP server configuration and reachability."""
     lines = ["RomM MCP Status:\n"]
     lines.append(f"  URL: {cfg.romm_url}")
-    lines.append(f"  Username: {cfg.romm_username}")
+    if cfg.romm_client_token:
+        lines.append("  Auth: client token (rmm_...)")
+    else:
+        lines.append(f"  Username: {cfg.romm_username}")
     lines.append(f"  TLS verify: {cfg.tls_verify}")
     lines.append(f"  Timeouts: {cfg.request_timeout}s / {cfg.request_timeout_long}s (long)\n")
 
