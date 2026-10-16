@@ -1756,3 +1756,163 @@ async def test_similar_roms_rejects_bad_rom_id(calls):
     out = await server.romm_similar_roms(0)
     assert out == "rom_id must be positive."
     assert not calls
+
+
+# ── romm_notifications ──────────────────────────────────────────────────────
+
+
+async def test_notifications_shaping(calls):
+    calls.responses.append([])
+    await server.romm_notifications()
+    req = calls[0]
+    assert req["method"] == "GET"
+    assert req["path"] == "notifications"
+    assert req["params"] is None
+
+
+async def test_notifications_newest_first(calls):
+    calls.responses.append([
+        {"id": 1, "title": "OLDEST", "created_at": "2026-01-01T00:00:00Z"},
+        {"id": 2, "title": "NEWEST", "created_at": "2026-03-01T00:00:00Z"},
+        {"id": 3, "title": "MIDDLE", "created_at": "2026-02-01T00:00:00Z"},
+        {"id": 4, "title": "UNDATEDA"},
+        {"id": 5, "title": "UNDATEDB"},
+    ])
+    out = await server.romm_notifications()
+    assert out.index("NEWEST") < out.index("MIDDLE") < out.index("OLDEST")
+    # Undated entries keep their API order and follow the dated ones.
+    assert out.index("OLDEST") < out.index("UNDATEDA") < out.index("UNDATEDB")
+
+
+async def test_notifications_render_fields_and_unread_marker(calls):
+    calls.responses.append([
+        {"id": 1, "title": "Warning", "level": "warning", "body": "x" * 250,
+         "link": "https://example.com", "created_at": "2026-01-01T00:00:00Z",
+         "is_read": False},
+        {"id": 2, "title": "Read one", "level": "info", "is_read": True},
+    ])
+    out = await server.romm_notifications()
+    assert "  - [WARNING] Warning (unread)" in out
+    assert "  - [INFO] Read one" in out
+    assert "[INFO] Read one (unread)" not in out
+    assert "    " + "x" * 200 + "..." in out
+    assert "x" * 201 not in out
+    assert "    Link: https://example.com" in out
+    assert "    2026-01-01T00:00:00Z" in out
+    assert "    ID: 1" in out
+    assert "    ID: 2" in out
+
+
+async def test_notifications_empty(calls):
+    calls.responses.append([])
+    out = await server.romm_notifications()
+    assert out == "No notifications."
+
+
+# ── romm_notify / romm_notifications_read / romm_notification_dismiss ──────
+
+
+async def test_notify_shaping_default(calls):
+    calls.responses.append({"id": 5})
+    out = await server.romm_notify("T")
+    req = calls[0]
+    assert req["method"] == "POST"
+    assert req["path"] == "notifications"
+    assert req["json"] == {"title": "T", "body": "", "level": "info"}
+    assert "kind" not in req["json"]
+    assert "recipients" not in req["json"]
+    assert "(id: 5)" in out
+
+
+async def test_notify_link_when_given(calls):
+    calls.responses.append({"id": 6})
+    await server.romm_notify("T", link="https://example.com")
+    assert calls[0]["json"] == {
+        "title": "T", "body": "", "level": "info",
+        "link": "https://example.com"}
+    calls.responses.append({"id": 7})
+    await server.romm_notify("T")
+    assert "link" not in calls[1]["json"]
+
+
+async def test_notify_empty_title_no_request(calls):
+    for title in ("", "   "):
+        assert await server.romm_notify(title) == "title is required."
+    assert not calls and not calls.bytes and not calls.uploads
+
+
+async def test_notify_invalid_level_no_request(calls):
+    # Case-sensitive: 'INFO' is rejected too. Level is echoed in single quotes,
+    # mirroring romm_set_status.
+    out = await server.romm_notify("T", level="bogus")
+    assert out == "Invalid level 'bogus'. Valid: info, success, warning, error."
+    out = await server.romm_notify("T", level="INFO")
+    assert out == "Invalid level 'INFO'. Valid: info, success, warning, error."
+    assert not calls and not calls.bytes and not calls.uploads
+
+
+async def test_notify_message_includes_id(calls):
+    calls.responses.append({"id": 5})
+    out = await server.romm_notify("Hello")
+    assert out == 'Notification "Hello" created (id: 5).'
+
+
+async def test_notifications_read_mark_some(calls):
+    out = await server.romm_notifications_read([3, 7])
+    req = calls[0]
+    assert req["method"] == "POST"
+    assert req["path"] == "notifications/read"
+    assert req["json"] == {"ids": [3, 7]}
+    assert out == "Marked 2 notification(s) as read."
+
+
+async def test_notifications_read_mark_all(calls):
+    out = await server.romm_notifications_read()
+    # The ids key is present with null on the wire (mark ALL as read).
+    assert calls[0]["json"] == {"ids": None}
+    assert "ids" in calls[0]["json"]
+    assert out == "Marked all notifications as read."
+
+
+async def test_notifications_read_empty_list_no_request(calls):
+    out = await server.romm_notifications_read([])
+    assert out == ("Provide at least one notification ID, or omit ids to mark "
+                   "all as read.")
+    assert not calls and not calls.bytes and not calls.uploads
+
+
+async def test_notifications_read_rejects_non_positive_ids(calls):
+    for bad in ([0], [-1]):
+        assert await server.romm_notifications_read(bad) == (
+            "notification IDs must be positive.")
+    assert not calls and not calls.bytes and not calls.uploads
+
+
+async def test_notification_dismiss_all(calls):
+    calls.responses.append({})
+    out = await server.romm_notification_dismiss()
+    assert calls[0]["method"] == "DELETE"
+    assert calls[0]["path"] == "notifications"
+    assert calls[0]["json"] is None
+    assert out == "Dismissed all notifications."
+
+
+async def test_notification_dismiss_one(calls):
+    calls.responses.append({})
+    out = await server.romm_notification_dismiss(7)
+    assert calls[0]["method"] == "DELETE"
+    assert calls[0]["path"] == "notifications/7"
+    assert out == "Dismissed notification 7."
+
+
+def test_notification_dismiss_docstring_is_destructive():
+    doc = server.romm_notification_dismiss.__doc__
+    assert doc.startswith("Permanently")
+    assert "cannot be undone" in doc
+    assert "ALL" in doc
+
+
+async def test_notification_dismiss_rejects_negative_id(calls):
+    out = await server.romm_notification_dismiss(-1)
+    assert out == "notification_id must be 0 (all) or a positive ID."
+    assert not calls and not calls.bytes and not calls.uploads

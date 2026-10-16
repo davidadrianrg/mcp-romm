@@ -2947,6 +2947,116 @@ async def romm_metadata_search(rom_id: int, search_term: str = "",
     return "\n".join(lines)
 
 
+# ── Tools — Notifications (RomM 5.0+) ────────────────────────────────────
+
+
+_VALID_NOTIFICATION_LEVELS = ("info", "success", "warning", "error")
+
+
+@mcp.tool()
+async def romm_notifications() -> str:
+    """List your notifications, newest first (RomM 5.0+)."""
+    data = await _get("notifications")
+
+    items = data.get("items", []) if isinstance(data, dict) else data
+    if not isinstance(items, list) or not items:
+        return "No notifications."
+
+    # Enforce newest-first client-side with a stable descending sort on
+    # created_at; entries without it keep their API-relative order and follow
+    # the dated ones.
+    dated = [n for n in items if n.get("created_at")]
+    undated = [n for n in items if not n.get("created_at")]
+    dated.sort(key=lambda n: n.get("created_at"), reverse=True)
+
+    lines = [f"Notifications ({len(items)}):\n"]
+    for n in dated + undated:
+        level = str(n.get("level", "info")).upper()
+        read_flag = n.get("is_read", n.get("read", False))
+        line = f"  - [{level}] {n.get('title', '')}"
+        if not read_flag:
+            line += " (unread)"
+        lines.append(line)
+        body = n.get("body", "")
+        if body:
+            short = body[:200]
+            if len(body) > 200:
+                short += "..."
+            lines.append(f"    {short}")
+        if n.get("link"):
+            lines.append(f"    Link: {n['link']}")
+        if n.get("created_at"):
+            lines.append(f"    {n['created_at']}")
+        lines.append(f"    ID: {n.get('id', '?')}")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def romm_notify(title: str, body: str = "", level: str = "info",
+                      link: str = "") -> str:
+    """Create a notification for yourself (RomM 5.0+). Requires me.write.
+
+    title: Notification title (required).
+    body: Optional notification body text.
+    level: One of "info", "success", "warning", "error" (default: info).
+    link: Optional URL the notification links to.
+    """
+    if not title.strip():
+        return "title is required."
+    if level not in _VALID_NOTIFICATION_LEVELS:
+        return (f"Invalid level '{level}'. Valid: "
+                f"{', '.join(_VALID_NOTIFICATION_LEVELS)}.")
+
+    payload: dict = {"title": title, "body": body, "level": level}
+    if link:
+        payload["link"] = link
+
+    data = await _post("notifications", payload)
+    notification_id = data.get("id", "?") if isinstance(data, dict) else "?"
+    return f'Notification "{title}" created (id: {notification_id}).'
+
+
+@mcp.tool()
+async def romm_notifications_read(ids: list[int] | None = None) -> str:
+    """Mark your notifications as read (RomM 5.0+). Requires me.write.
+
+    Omit ids to mark every notification as read.
+
+    ids: Notification IDs to mark as read (omit to mark all).
+    """
+    if ids is not None:
+        if not ids:
+            return ("Provide at least one notification ID, or omit ids to mark "
+                    "all as read.")
+        if any(nid <= 0 for nid in ids):
+            return "notification IDs must be positive."
+
+    await _post("notifications/read", {"ids": ids})
+    if ids is None:
+        return "Marked all notifications as read."
+    return f"Marked {len(ids)} notification(s) as read."
+
+
+@mcp.tool()
+async def romm_notification_dismiss(notification_id: int = 0) -> str:
+    """Permanently dismiss notifications. This cannot be undone.
+
+    With the default id 0 this dismisses ALL of your notifications; a positive
+    id dismisses just that one.
+
+    notification_id: The notification's ID, or 0 to dismiss all (default: 0).
+    """
+    if notification_id < 0:
+        return "notification_id must be 0 (all) or a positive ID."
+
+    if notification_id == 0:
+        await _delete("notifications")
+        return "Dismissed all notifications."
+    await _delete(f"notifications/{notification_id}")
+    return f"Dismissed notification {notification_id}."
+
+
 def _transport_config() -> tuple[str, dict]:
     """Resolve mcp.run() transport from env.
 
