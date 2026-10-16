@@ -5,6 +5,11 @@
 ### Added
 
 - **`ROMM_CLIENT_TOKEN`** — authenticate with a RomM client token (`rmm_...`, RomM 5.x) instead of the username/password OAuth2 grant. When set, the token is sent as the bearer credential directly and no `/api/token` call is made; a rejected token surfaces a clear regeneration hint.
+- `romm_status` now reports which auth mode is active (client token vs username/password).
+
+### Changed
+
+- README "Known issues" refreshed from a live run against RomM 5.4.0: `romm_filters` and note listing are resolved upstream; scan triggering goes through `POST /api/tasks/scan`.
 
 ## 1.4.0 — 2026-10-16
 

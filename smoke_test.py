@@ -20,7 +20,8 @@ list of tool names to skip entirely (e.g. endpoints with known server-side
 bugs, where even a failing call has side effects — RomM 5.0.0's
 /api/roms/filters strands a runaway DB query per call).
 
-Requires ROMM_URL / ROMM_USERNAME / ROMM_PASSWORD in the environment.
+Requires ROMM_URL and either ROMM_CLIENT_TOKEN or
+ROMM_USERNAME/ROMM_PASSWORD in the environment.
 Run: python smoke_test.py
 """
 

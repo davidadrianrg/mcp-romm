@@ -230,23 +230,15 @@ The server authenticates with RomM in one of two modes:
 
 ## Known issues
 
-Server-side issues found by running this server's live e2e suite
-(`smoke_test.py`) against a RomM 5.0.0 instance. The first two were observed on
-5.0.0 and are **pending verification against 5.4** — they may or may not still
-occur there:
+Issues found by running this server's live e2e suite (`smoke_test.py`) against
+RomM instances, with their current status:
 
-- **`romm_filters` times out (observed on 5.0.0; pending verification on 5.4).**
-  `GET /api/roms/filters` in RomM 5.0.0 executes a query with a cartesian
-  product (RomM's log flags it at `roms_handler.py:2159`); the request hangs
-  until the client timeout, and the abandoned query keeps running server-side
-  at high CPU. Avoid calling `romm_filters` on 5.0.0 until this is fixed
-  upstream — every call strands another runaway database query.
-- **Note listing 500s once any note exists (observed on 5.0.0; pending
-  verification on 5.4).** RomM 5.0.0's `GET /api/roms/{id}/notes` fails
-  serialization (`UserNoteSchema` validation in `endpoints/roms/notes.py`)
-  whenever the ROM has at least one note. Creating and deleting notes work;
-  `romm_rom_notes` (and the read-back after `romm_add_note`) errors on such
-  ROMs until fixed upstream.
+- **`romm_filters` — resolved in RomM 5.4.** Observed hanging on 5.0.0 (a
+  cartesian-product query that kept running server-side after the client timed
+  out); verified working on a live 5.4.0 instance (2026-10-16).
+- **`romm_rom_notes` — resolved in RomM 5.4.** Observed 500ing on 5.0.0 once a
+  ROM had any note; verified working live on 5.4.0 — listing, create, update
+  and delete all pass the e2e suite.
 - **Library scan triggering — resolved in 1.3.0.** RomM 5.0.0 rejected
   `POST /api/tasks/run/scan_library` (`scan_library` is `manual_run: false`).
   `romm_scan_library` now triggers scans through `POST /api/tasks/scan` (a
