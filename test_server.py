@@ -868,6 +868,21 @@ def test_write_download_wraps_valueerror_as_runtimeerror(tmp_path):
                                default_name="bad\x00name.bin")
 
 
+# ── romm_save_download ───────────────────────────────────────────────────────
+
+
+async def test_save_download_shaping_and_fallback(calls, tmp_path):
+    calls.bytes_responses.append((b"SAVE", {}))
+    out = await server.romm_save_download(3, str(tmp_path))
+    req = calls.bytes[0]
+    assert req["method"] == "GET"
+    assert req["path"] == "saves/3/content"
+    assert req["params"] is None
+    assert req["long_timeout"] is True
+    assert (tmp_path / "save_3.bin").read_bytes() == b"SAVE"
+    assert str(tmp_path / "save_3.bin") in out
+
+
 # ── romm_state_upload ────────────────────────────────────────────────────────
 
 
@@ -994,3 +1009,150 @@ async def test_state_update_blank_file_name_makes_no_request(calls):
     assert not calls
 
 
+# ── romm_save_upload ─────────────────────────────────────────────────────────
+
+
+async def test_save_upload_shaping_slot_and_overwrite(calls, tmp_path):
+    save_file = tmp_path / "game.sav"
+    save_file.write_bytes(b"SAVEDATA")
+    calls.uploads_responses.append({"id": 3})
+    out = await server.romm_save_upload(
+        5, str(save_file), emulator="snes9x", slot="2", overwrite=True)
+    req = calls.uploads[0]
+    assert req["method"] == "POST"
+    assert req["path"] == "saves"
+    assert req["params"] == {"rom_id": 5, "emulator": "snes9x",
+                             "slot": "2", "overwrite": True}
+    assert "autocleanup" not in req["params"]
+    assert req["long_timeout"] is True
+    assert set(req["files"]) == {"saveFile"}
+    assert req["files"]["saveFile"] == (
+        "game.sav", b"SAVEDATA", "application/octet-stream")
+    assert "Uploaded save file game.sav for ROM 5 (save id: 3)." in out
+
+
+async def test_save_upload_omits_optional_params_by_default(calls, tmp_path):
+    save_file = tmp_path / "game.sav"
+    save_file.write_bytes(b"S")
+    calls.uploads_responses.append({"id": 4})
+    out = await server.romm_save_upload(5, str(save_file))
+    req = calls.uploads[0]
+    assert req["params"] == {"rom_id": 5}
+    assert "slot" not in req["params"]
+    assert "overwrite" not in req["params"]
+    assert "autocleanup" not in req["params"]
+    assert set(req["files"]) == {"saveFile"}
+    assert "(save id: 4)" in out
+
+
+async def test_save_upload_uses_screenshotfile_field(calls, tmp_path):
+    save_file = tmp_path / "game.sav"
+    save_file.write_bytes(b"S")
+    shot = tmp_path / "shot.png"
+    shot.write_bytes(b"PNG")
+    calls.uploads_responses.append({"id": 5})
+    out = await server.romm_save_upload(
+        5, str(save_file), screenshot_path=str(shot))
+    req = calls.uploads[0]
+    assert set(req["files"]) == {"saveFile", "screenshotFile"}
+    assert req["files"]["screenshotFile"][0] == "shot.png"
+    assert "Uploaded save file game.sav for ROM 5" in out
+
+
+async def test_save_upload_missing_file_makes_no_request(calls, tmp_path):
+    out = await server.romm_save_upload(5, str(tmp_path / "nope.sav"))
+    assert "File not found" in out
+    assert not calls.uploads
+
+
+async def test_save_upload_missing_screenshot_makes_no_request(calls, tmp_path):
+    save_file = tmp_path / "game.sav"
+    save_file.write_bytes(b"S")
+    out = await server.romm_save_upload(
+        5, str(save_file), screenshot_path=str(tmp_path / "nope.png"))
+    assert "Screenshot file not found" in out
+    assert not calls.uploads
+
+
+# ── romm_save_delete / romm_save_favorite / romm_save_update ─────────────────
+
+
+async def test_save_delete_posts_ids_body(calls):
+    calls.responses.append({})
+    out = await server.romm_save_delete(3)
+    assert calls[0]["method"] == "POST"
+    assert calls[0]["path"] == "saves/delete"
+    assert calls[0]["json"] == {"saves": [3]}
+    assert "Deleted save file 3." in out
+
+
+def test_save_delete_docstring_is_destructive():
+    doc = server.romm_save_delete.__doc__
+    assert doc.startswith("Permanently delete")
+    assert "cannot be undone" in doc
+
+
+async def test_save_favorite_true(calls):
+    calls.responses.append({})
+    out = await server.romm_save_favorite(3)
+    assert calls[0]["method"] == "PUT"
+    assert calls[0]["path"] == "saves/3/favorite"
+    assert calls[0]["json"] == {"is_favorite": True}
+    assert "Save file 3: added to favorites." in out
+
+
+async def test_save_favorite_false(calls):
+    calls.responses.append({})
+    out = await server.romm_save_favorite(3, favorite=False)
+    assert calls[0]["json"] == {"is_favorite": False}
+    assert "Save file 3: removed from favorites." in out
+
+
+async def test_save_update_single_field_sends_one_put(calls):
+    calls.responses.append({})
+    out = await server.romm_save_update(3, is_public=False)
+    assert len(calls) == 1
+    assert calls[0]["path"] == "saves/3/visibility"
+    assert calls[0]["json"] == {"is_public": False}
+    assert "Save file 3: updated is_public." in out
+
+
+async def test_save_update_all_fields_in_fixed_order(calls):
+    calls.responses.extend([{}, {}, {}])
+    out = await server.romm_save_update(
+        3, labels=["a"], is_public=True, file_name="y.sav")
+    assert [c["path"] for c in calls] == [
+        "saves/3/labels", "saves/3/visibility", "saves/3/file-name"]
+    assert [c["json"] for c in calls] == [
+        {"labels": ["a"]}, {"is_public": True}, {"file_name": "y.sav"}]
+    assert "Save file 3: updated labels, is_public, file_name." in out
+
+
+async def test_save_update_noop_makes_no_request(calls):
+    out = await server.romm_save_update(3)
+    assert "Nothing to update" in out
+    assert not calls
+
+
+async def test_save_update_blank_file_name_makes_no_request(calls):
+    out = await server.romm_save_update(3, file_name="  ")
+    assert "file_name must not be empty" in out
+    assert not calls
+
+
+# ── romm_saves slot/device extension ─────────────────────────────────────────
+
+
+async def test_saves_adds_slot_and_device_filters(calls):
+    calls.responses.append([])
+    await server.romm_saves(slot="2", device_id="abc")
+    assert calls[0]["method"] == "GET"
+    assert calls[0]["path"] == "saves"
+    assert calls[0]["params"] == {"slot": "2", "device_id": "abc"}
+
+
+async def test_saves_omits_empty_slot_and_device(calls):
+    calls.responses.append([])
+    out = await server.romm_saves()
+    assert calls[0]["params"] == {}
+    assert "No saves found." in out

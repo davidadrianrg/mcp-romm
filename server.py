@@ -1140,17 +1140,24 @@ async def romm_smart_collections() -> str:
 
 
 @mcp.tool()
-async def romm_saves(rom_id: int = 0, platform_id: int = 0) -> str:
-    """List save files. Filter by ROM or platform.
+async def romm_saves(rom_id: int = 0, platform_id: int = 0, slot: str = "",
+                     device_id: str = "") -> str:
+    """List save files. Filter by ROM, platform, slot, or device.
 
     rom_id: Filter to a specific ROM (0 = all).
     platform_id: Filter to a specific platform (0 = all).
+    slot: Filter to a specific save slot (empty = all).
+    device_id: Filter to a specific device ID (empty = all).
     """
     params: dict = {}
     if rom_id:
         params["rom_id"] = rom_id
     if platform_id:
         params["platform_id"] = platform_id
+    if slot:
+        params["slot"] = slot
+    if device_id:
+        params["device_id"] = device_id
 
     data = await _get("saves", params=params)
 
@@ -1495,6 +1502,119 @@ async def romm_state_update(state_id: int, labels: list[str] | None = None,
     return f"Save state {state_id}: updated {', '.join(changed)}."
 
 
+# ── Tools — Write: saves (RomM 5.x) ──────────────────────────────────────
+
+
+@mcp.tool()
+async def romm_save_download(save_id: int, target_path: str,
+                             overwrite: bool = False) -> str:
+    """Download a save file to a local path.
+
+    save_id: The save file's ID (from romm_saves).
+    target_path: Destination file or directory. A directory (an existing one,
+                 or a path ending in a separator) keeps RomM's suggested name.
+    overwrite: Replace an existing file (default: false).
+    """
+    content, headers = await _request_bytes(
+        "GET", f"saves/{save_id}/content", long_timeout=True,
+    )
+    try:
+        dest, size = _write_download(
+            content, headers, target_path=target_path,
+            default_name=f"save_{save_id}.bin", overwrite=overwrite,
+        )
+    except FileExistsError as e:
+        return f"File already exists: {e} (use overwrite=True to replace it)."
+    return f"Saved save file {save_id} to {dest} ({_fmt_size(size)})."
+
+
+@mcp.tool()
+async def romm_save_upload(rom_id: int, file_path: str, emulator: str = "",
+                           slot: str = "", screenshot_path: str = "",
+                           overwrite: bool = False) -> str:
+    """Upload a save file to RomM. Requires the assets.write scope.
+
+    rom_id: The ROM the save file belongs to.
+    file_path: Path to the local save file to upload.
+    emulator: Optional emulator name to record alongside the save.
+    slot: Optional save slot to record alongside the save.
+    screenshot_path: Optional local screenshot to attach to the save.
+    overwrite: Replace an existing save on the server (default: false).
+    """
+    if rom_id <= 0:
+        return "rom_id must be positive."
+    if not os.path.isfile(file_path):
+        return f"File not found: {file_path}."
+    if screenshot_path and not os.path.isfile(screenshot_path):
+        return f"Screenshot file not found: {screenshot_path}."
+
+    params: dict = {"rom_id": rom_id}
+    if emulator:
+        params["emulator"] = emulator
+    if slot:
+        params["slot"] = slot
+    if overwrite:
+        params["overwrite"] = True
+
+    file_bytes = _read_file_bytes(file_path)
+    files: dict[str, tuple[str, bytes, str]] = {
+        "saveFile": (os.path.basename(file_path), file_bytes, "application/octet-stream"),
+    }
+    if screenshot_path:
+        shot_bytes = _read_file_bytes(screenshot_path)
+        files["screenshotFile"] = (
+            os.path.basename(screenshot_path), shot_bytes, "application/octet-stream")
+
+    data = await _request_multipart(
+        "POST", "saves", params=params, files=files, long_timeout=True,
+    )
+    save_id = data.get("id", "?") if isinstance(data, dict) else "?"
+    return (f"Uploaded save file {os.path.basename(file_path)} for ROM {rom_id} "
+            f"(save id: {save_id}).")
+
+
+@mcp.tool()
+async def romm_save_delete(save_id: int) -> str:
+    """Permanently delete a save file. This cannot be undone.
+
+    save_id: The save file's ID (from romm_saves).
+    """
+    await _post("saves/delete", {"saves": [save_id]})
+    return f"Deleted save file {save_id}."
+
+
+@mcp.tool()
+async def romm_save_favorite(save_id: int, favorite: bool = True) -> str:
+    """Add or remove a save file from your favorites.
+
+    save_id: The save file's ID.
+    favorite: True to favorite (default), False to unfavorite.
+    """
+    await _put(f"saves/{save_id}/favorite", {"is_favorite": favorite})
+    if favorite:
+        return f"Save file {save_id}: added to favorites."
+    return f"Save file {save_id}: removed from favorites."
+
+
+@mcp.tool()
+async def romm_save_update(save_id: int, labels: list[str] | None = None,
+                           is_public: bool | None = None,
+                           file_name: str | None = None) -> str:
+    """Update a save file's metadata. Only the fields you provide are changed.
+
+    save_id: The save file's ID (from romm_saves).
+    labels: New label list (omit to leave unchanged).
+    is_public: New visibility (omit to leave unchanged).
+    file_name: New file name (omit to leave unchanged; must not be empty).
+    """
+    if file_name is not None and not file_name.strip():
+        return "file_name must not be empty."
+    if labels is None and is_public is None and file_name is None:
+        return "Nothing to update — provide at least one field to change."
+    changed = await _put_asset_props(
+        "saves", save_id, labels=labels, is_public=is_public, file_name=file_name,
+    )
+    return f"Save file {save_id}: updated {', '.join(changed)}."
 
 
 # ── Tools — Firmware & Devices ───────────────────────────────────────────
