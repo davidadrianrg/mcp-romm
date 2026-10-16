@@ -1,16 +1,19 @@
 """RomM MCP Server — browse and manage your retro game library with AI.
 
 Single-file MCP server for RomM (https://github.com/rommapp/romm).
-Provides 53 tools: 31 read-only for browsing, searching, and viewing metadata,
-plus 22 write tools for play status, play sessions, favorites, notes,
-collections (regular and smart), and save states/save files (upload, delete,
-favorite, and metadata). Targets RomM 5.0+; most read tools degrade
-gracefully on 4.4+ (tools marked "RomM 5.0+" need 5.0).
+Provides 69 tools: 39 read-only for browsing, searching, and viewing metadata,
+plus 30 write tools for play status, play sessions, favorites, notes,
+collections (regular and smart), save states/save files/memory cards (upload,
+delete, favorite, metadata), server-side metadata exports, and notifications.
+Targets RomM 5.0+; most read tools degrade gracefully on 4.4+ (tools marked
+"RomM 5.0+" need 5.0).
 
 Write tools change your own user data (play status, favorites, notes), your
-own collections, and your own save states and save files. No tool modifies ROM
-files, platforms, firmware, or other users. OAuth2 password grant with
-automatic token refresh and 401 retry.
+own collections, your own save states, save files and memory cards, and your
+own notifications. The two export tools write gamelist.xml / metadata.pegasus.txt
+metadata files INSIDE the platform directories ON the RomM server (nothing is
+downloaded to the client). No tool modifies ROM files, firmware, or other
+users. OAuth2 password grant with automatic token refresh and 401 retry.
 
 Tools:
   romm_status              — Check server configuration and reachability
@@ -29,11 +32,18 @@ Tools:
   romm_state_detail        — Full detail for a single save state (RomM 5.x)
   romm_state_download      — Download a save state to a local path (RomM 5.x)
   romm_save_download       — Download a save file to a local path (RomM 5.x)
+  romm_memory_cards        — List memory cards (RomM 5.x)
+  romm_memory_card_detail  — Full detail for a single memory card (RomM 5.x)
+  romm_memory_card_versions — List saved versions of a memory card (RomM 5.x)
+  romm_memory_card_download — Download a memory card to a local path (RomM 5.x)
   romm_user_profile        — Browse by user status (now playing, backlog, etc.)
   romm_firmware            — List BIOS/firmware files per platform
   romm_devices             — List registered devices
   romm_rom_notes           — View notes on a ROM
   romm_filters             — Available filter values (genres, regions, etc.)
+  romm_recommendations     — Personalized ROM recommendations (RomM 5.x)
+  romm_random_rom          — Pick a random ROM, optionally per platform (RomM 5.x)
+  romm_similar_roms        — ROMs similar to a given ROM (RomM 5.x)
   romm_tasks               — Task registry + running task status
   romm_scan_library        — Trigger a background library rescan
   romm_task_detail         — Show a background task's status and result
@@ -44,6 +54,7 @@ Tools:
   romm_smart_collection_detail — Smart collection rules + matching ROMs
   romm_whoami              — Authenticated account, role, and permissions
   romm_metadata_search     — Search metadata providers for ROM matches
+  romm_notifications       — List your notifications, newest first (RomM 5.0+)
 
 Write tools (modify your user data, collections, saves, and save states):
   romm_set_status          — Set play status, backlog, now-playing, rating, completion
@@ -68,6 +79,14 @@ Write tools (modify your user data, collections, saves, and save states):
   romm_save_delete         — Delete a save file (permanent)
   romm_save_favorite       — Add or remove a save file from favorites
   romm_save_update         — Edit a save file's labels/visibility/file name
+  romm_export_gamelist     — Write gamelist.xml on the server (per platform)
+  romm_export_pegasus      — Write metadata.pegasus.txt on the server
+  romm_memory_card_version_upload — Upload a new memory-card version (RomM 5.x)
+  romm_memory_card_update  — Edit a memory card's name/visibility (RomM 5.x)
+  romm_memory_card_delete  — Delete a memory card (permanent)
+  romm_notify              — Create a notification for yourself (RomM 5.0+)
+  romm_notifications_read  — Mark your notifications as read (RomM 5.0+)
+  romm_notification_dismiss — Dismiss notifications (permanent)
 
 Environment variables:
   ROMM_URL              — RomM instance URL (default: http://localhost:3000)
@@ -83,13 +102,16 @@ Environment variables:
 
 Security:
   - Least privilege: the OAuth2 token requests only read scopes plus
-    roms.user.write, collections.write, assets.write, and tasks.run — exactly
-    what the tools do. It can now upload, delete and relabel your own save
-    states and save files, but it still cannot modify ROM files, platforms,
-    firmware, or other users.
+    roms.user.write, collections.write, assets.write, platforms.write
+    (server-side gamelist/pegasus export), me.write (your own notifications),
+    and tasks.run — exactly what the tools do. It can now upload, delete and
+    relabel your own save states, save files and memory cards, and manage your
+    own notifications, but it still cannot modify ROM files, firmware, or
+    other users.
   - Write tools that permanently destroy data (romm_delete_note,
     romm_delete_collection, romm_state_delete, romm_save_delete,
-    romm_delete_play_session, romm_delete_smart_collection) are clearly
+    romm_memory_card_delete, romm_delete_play_session,
+    romm_delete_smart_collection, romm_notification_dismiss) are clearly
     labeled as such.
   - Credentials are held in memory only, never written to disk.
   - TLS verification is enabled by default.

@@ -1,5 +1,43 @@
 # Changelog
 
+## 1.4.0 — 2026-10-16
+
+Server-side metadata exports, memory cards, recommendations and notifications —
+16 new tools (69 total: 39 read + 30 write).
+
+### Added
+
+- **Server-side metadata exports:** `romm_export_gamelist` and
+  `romm_export_pegasus` trigger RomM to write `gamelist.xml` (resp.
+  `metadata.pegasus.txt`) inside the platform directories on the RomM server
+  itself; nothing is downloaded to the client.
+- **Memory cards (RomM 5.x):** `romm_memory_cards` (list, optional emulator
+  filter), `romm_memory_card_detail`, `romm_memory_card_versions`,
+  `romm_memory_card_download` (latest or a specific version), and the write
+  tools `romm_memory_card_version_upload` (the broker-layout zip only — loose
+  `.ps2`/`.raw` images are rejected), `romm_memory_card_update`
+  (name/visibility), and `romm_memory_card_delete`.
+- **Recommendations (RomM 5.x):** `romm_recommendations` (with optional
+  refresh), `romm_random_rom` (optional single-platform filter), and
+  `romm_similar_roms` — each showing the game, its score, and the reasons.
+- **Notifications (RomM 5.0+):** `romm_notifications` (newest first),
+  `romm_notify`, `romm_notifications_read` (all, or specific IDs), and
+  `romm_notification_dismiss` (one, or all with id 0).
+- `platforms.write` (the two server-side exports) and `me.write` (your own
+  notifications) added to the requested OAuth scopes; the scope set is
+  otherwise unchanged.
+
+### Changed
+
+- `_validate_path_id` now caps path ids at 128 characters (SEC-008 residual
+  hardening); the existing charset and dot-segment rules and their messages are
+  unchanged.
+- Display strings for `romm_task_detail` and `romm_virtual_collection_detail`
+  now echo the normalized id rather than the raw argument.
+- `smoke_test.py` gains three read-only live checks: memory cards,
+  recommendations, and notifications.
+- Version bumped to 1.4.0.
+
 ## 1.3.0 — 2026-10-16
 
 Save-state and save-file management plus RomM 5.x scan triggering — 13 new tools

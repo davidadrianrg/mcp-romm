@@ -1,6 +1,6 @@
 # RomM MCP Server
 
-An [MCP](https://modelcontextprotocol.io) server for [RomM](https://github.com/rommapp/romm) — the self-hosted retro game library manager. 53 tools: 31 read-only for browsing platforms, searching ROMs, viewing metadata, collections (regular, smart, and virtual), saves, save states, play activity, and tasks — plus 22 write tools for play status, play sessions, favorites, notes, collection management, and save states/save files (upload, delete, favorite, and metadata), through any MCP-compatible AI assistant.
+An [MCP](https://modelcontextprotocol.io) server for [RomM](https://github.com/rommapp/romm) — the self-hosted retro game library manager. 69 tools: 39 read-only for browsing platforms, searching ROMs, viewing metadata, collections (regular, smart, and virtual), saves, save states, memory cards, recommendations, play activity, notifications, and tasks — plus 30 write tools for play status, play sessions, favorites, notes, collection management, save states/save files/memory cards (upload, delete, favorite, and metadata), server-side metadata exports, and notifications, through any MCP-compatible AI assistant.
 
 ## Tools
 
@@ -17,6 +17,9 @@ An [MCP](https://modelcontextprotocol.io) server for [RomM](https://github.com/r
 | `romm_search` | Search ROMs by name |
 | `romm_search_by_hash` | Identify a ROM by file hash (CRC, MD5, SHA1, or RetroAchievements) |
 | `romm_filters` | Available filter values (genres, regions, languages, tags) |
+| `romm_recommendations` | Personalized ROM recommendations from your play history (RomM 5.x) |
+| `romm_random_rom` | Pick a random ROM, optionally restricted to one platform (RomM 5.x) |
+| `romm_similar_roms` | ROMs similar to a given ROM, with scores and reasons (RomM 5.x) |
 | `romm_collections` | List user-curated collections |
 | `romm_collection_detail` | List ROMs in a specific collection |
 | `romm_smart_collections` | List auto-generated smart collections |
@@ -25,6 +28,10 @@ An [MCP](https://modelcontextprotocol.io) server for [RomM](https://github.com/r
 | `romm_state_detail` | Full detail for a single save state (RomM 5.x) |
 | `romm_state_download` | Download a save state to a local path (RomM 5.x) |
 | `romm_save_download` | Download a save file to a local path (RomM 5.x) |
+| `romm_memory_cards` | List memory cards, optionally filtered by emulator (RomM 5.x) |
+| `romm_memory_card_detail` | Full detail for a single memory card (RomM 5.x) |
+| `romm_memory_card_versions` | List saved versions of a memory card (RomM 5.x) |
+| `romm_memory_card_download` | Download a memory card — latest or a specific version — to a local path (RomM 5.x) |
 | `romm_user_profile` | Browse by status (now playing, backlog, completed, etc.) |
 | `romm_rom_notes` | View notes on a ROM |
 | `romm_firmware` | List BIOS/firmware files per platform |
@@ -39,10 +46,11 @@ An [MCP](https://modelcontextprotocol.io) server for [RomM](https://github.com/r
 | `romm_smart_collection_detail` | A smart collection's rules and matching ROMs (5.0+) |
 | `romm_whoami` | Authenticated account, role, and effective permissions |
 | `romm_metadata_search` | Search metadata providers (IGDB etc.) for ROM matches (5.0+) |
+| `romm_notifications` | List your notifications, newest first (5.0+) |
 
 ### Write
 
-These modify **your own** user data, collections, and save states and save files (upload, delete, favorite, and metadata). They cannot alter ROM files, platforms, firmware, or other users.
+These modify **your own** user data, collections, notifications, and save states, save files and memory cards (upload, delete, favorite, and metadata). The two `romm_export_*` tools write metadata files **inside the platform directories on the RomM server** — nothing is downloaded to the client. No tool alters ROM files, firmware, or other users.
 
 | Tool | Description |
 |------|-------------|
@@ -68,6 +76,14 @@ These modify **your own** user data, collections, and save states and save files
 | `romm_save_delete` | Delete a save file (permanent) |
 | `romm_save_favorite` | Add or remove a save file from favorites |
 | `romm_save_update` | Edit a save file's labels, visibility, or file name |
+| `romm_export_gamelist` | Write `gamelist.xml` inside the platform directories on the RomM server (nothing downloaded to the client) |
+| `romm_export_pegasus` | Write `metadata.pegasus.txt` inside the platform directories on the RomM server (nothing downloaded to the client) |
+| `romm_memory_card_version_upload` | Upload a new version of your own memory card — broker-layout zip only, loose `.ps2`/`.raw` rejected (RomM 5.x) |
+| `romm_memory_card_update` | Edit your own memory card's name or visibility (RomM 5.x) |
+| `romm_memory_card_delete` | Delete your own memory card (permanent, RomM 5.x) |
+| `romm_notify` | Create a notification for yourself (RomM 5.0+) |
+| `romm_notifications_read` | Mark your own notifications as read — all, or specific IDs (RomM 5.0+) |
+| `romm_notification_dismiss` | Dismiss your own notifications — one, or all with id 0 (permanent, RomM 5.0+) |
 
 ## Setup
 
@@ -193,9 +209,9 @@ And, with the write tools:
 
 ## Security
 
-- **Least privilege.** The OAuth2 token requests only the read scopes the tools use plus `roms.user.write`, `collections.write`, `assets.write`, and `tasks.run`. `assets.write` covers save-state and save uploads, deletes, and property updates. It deliberately does **not** request `roms.write`, `platforms.write`, `firmware.write`, `devices.write`, `users.write`, or `me.write` — no tool uses them.
-- **Bounded write surface.** Write tools change only your own user data (play status, favorites, notes), your own collections, and your own save states and save files (upload, delete, favorite, metadata). No tool edits ROM files, platforms, firmware, or other users.
-- **Destructive ops are labeled.** `romm_delete_note`, `romm_delete_collection`, `romm_delete_play_session`, `romm_delete_smart_collection`, `romm_state_delete`, and `romm_save_delete` permanently remove data and say so in their descriptions. (`romm_delete_collection` removes the grouping, not the ROMs.)
+- **Least privilege.** The OAuth2 token requests only the read scopes the tools use plus the write scopes those tools actually need: `roms.user.write` (play status, favorites, notes), `collections.write` (regular and smart collections), `assets.write` (save-state, save-file and memory-card uploads, deletes, and property updates), `platforms.write` (the two server-side metadata exports), `me.write` (your own notifications), and `tasks.run` (the library rescan). It deliberately does **not** request `roms.write`, `firmware.write`, `users.write`, or `devices.write` — no tool uses them.
+- **Bounded write surface.** Write tools change only your own user data (play status, favorites, notes), your own collections, your own save states, save files and memory cards (upload, delete, favorite, metadata), and your own notifications. The two export tools (`romm_export_gamelist`, `romm_export_pegasus`) write `gamelist.xml` / `metadata.pegasus.txt` **inside the platform directories on the RomM server** and download nothing to the client. No tool edits ROM files, firmware, or other users.
+- **Destructive ops are labeled.** `romm_delete_note`, `romm_delete_collection`, `romm_delete_play_session`, `romm_delete_smart_collection`, `romm_state_delete`, `romm_save_delete`, `romm_memory_card_delete`, and `romm_notification_dismiss` permanently remove data and say so in their descriptions. (`romm_delete_collection` removes the grouping, not the ROMs; `romm_notification_dismiss` with id 0 removes all of your notifications.)
 - **Credentials stay in memory.** Credentials and tokens are never written to disk. (Files move only where you ask: the download tools write to the local `target_path` you give them, and the upload tools read the local files you point them at.)
 - **TLS by default.** Certificate verification is enabled by default (`ROMM_TLS_VERIFY=true`).
 - **Auto-retry.** If a token expires mid-session, the server re-authenticates transparently.

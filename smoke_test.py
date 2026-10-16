@@ -1,15 +1,18 @@
 """Live end-to-end test for mcp-romm — the tools against a real RomM instance.
 
-Exercises the ACTUAL server.py tool code over HTTP against a live RomM: 29 of
-the 31 read tools plus the self-cleaning write tools. The two read tools that
-write local files, romm_state_download and romm_save_download, are excluded by
-design here (a live harness must not drop files on the host) and are covered by
-the unit suite instead. Write tests are self-cleaning: they operate on a
-throwaway collection and note, and capture-and-restore any user props they
-touch; no save-file or save-state upload, delete, favorite or update is ever
-issued against a real instance. The only lasting side effect is
-romm_scan_library, which triggers the same background quick-scan the scheduler
-runs.
+Exercises the ACTUAL server.py tool code over HTTP against a live RomM: 32 of
+the 39 read tools plus the self-cleaning write tools. The three read tools that
+write local files, romm_state_download, romm_save_download and
+romm_memory_card_download, are excluded by design here (a live harness must not
+drop files on the host); the four remaining reads, romm_random_rom,
+romm_similar_roms, romm_memory_card_detail and romm_memory_card_versions, are
+out of the smoke scope for this release. All seven are covered by the unit
+suite instead. Write tests
+are self-cleaning: they operate on a throwaway collection and note, and
+capture-and-restore any user props they touch; no save-file or save-state
+upload, delete, favorite or update is ever issued against a real instance. The
+only lasting side effect is romm_scan_library, which triggers the same
+background quick-scan the scheduler runs.
 
 A tool that raises is recorded as FAIL and the suite continues — one broken
 endpoint must not abort the run. Set ROMM_SMOKE_SKIP to a comma-separated
@@ -62,8 +65,10 @@ async def tool_out(name: str, coro) -> str | None:
 
 
 async def read_tools() -> dict:
-    """Run the read tools except the two local-file download tools; return
-    context (ids) for the write tests."""
+    """Run the read tools except the three local-file download tools (excluded
+    by design: no files on the host) and the four out-of-scope reads
+    romm_random_rom, romm_similar_roms, romm_memory_card_detail and
+    romm_memory_card_versions; return context (ids) for the write tests."""
     ctx: dict = {}
 
     out = await tool_out("romm_status", server.romm_status())
@@ -170,6 +175,19 @@ async def read_tools() -> dict:
                       looks_ok(out2) and f"Save state {sid}:" in out2, out2)
         else:
             print("SKIP  romm_state_detail - no save states discoverable")
+
+    out = await tool_out("romm_memory_cards", server.romm_memory_cards())
+    if out is not None:
+        check("romm_memory_cards", looks_ok(out), out)
+
+    out = await tool_out("romm_recommendations",
+                         server.romm_recommendations(limit=5))
+    if out is not None:
+        check("romm_recommendations", looks_ok(out), out)
+
+    out = await tool_out("romm_notifications", server.romm_notifications())
+    if out is not None:
+        check("romm_notifications", looks_ok(out), out)
 
     out = await tool_out("romm_user_profile (favorites)", server.romm_user_profile())
     if out is not None:
