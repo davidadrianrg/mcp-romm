@@ -7,6 +7,7 @@ Run:
     uv run pytest test_server.py -v
 """
 
+import dataclasses
 import json
 import os
 from urllib.parse import parse_qs
@@ -1976,3 +1977,40 @@ async def test_virtual_collection_detail_echoes_normalized_id(calls):
     calls.responses.append({})
     out = await server.romm_virtual_collection_detail(" genre:Action ")
     assert "Virtual collection genre:Action not found." in out
+
+
+# ── Auth modes: client token vs password grant ──────────────────────────────
+
+
+def test_configured_accepts_client_token_or_credentials():
+    token_only = dataclasses.replace(
+        server.cfg, romm_client_token="rmm_x", romm_username="", romm_password="")
+    assert token_only.configured is True
+    password_only = dataclasses.replace(
+        server.cfg, romm_client_token="", romm_username="u", romm_password="p")
+    assert password_only.configured is True
+    neither = dataclasses.replace(
+        server.cfg, romm_client_token="", romm_username="", romm_password="")
+    assert neither.configured is False
+
+
+async def test_auth_token_prefers_client_token(monkeypatch):
+    monkeypatch.setattr(
+        server, "cfg", dataclasses.replace(server.cfg, romm_client_token="rmm_test"))
+
+    async def must_not_run():
+        raise AssertionError("password grant must not run in client-token mode")
+
+    monkeypatch.setattr(server, "_acquire_token", must_not_run)
+    assert await server._auth_token() == "rmm_test"
+
+
+async def test_auth_token_falls_back_to_password_grant(monkeypatch):
+    monkeypatch.setattr(
+        server, "cfg", dataclasses.replace(server.cfg, romm_client_token=""))
+
+    async def fake_acquire():
+        return "oauth-token"
+
+    monkeypatch.setattr(server, "_acquire_token", fake_acquire)
+    assert await server._auth_token() == "oauth-token"

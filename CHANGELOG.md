@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.4.1 — 2026-10-16
+
+### Added
+
+- **`ROMM_CLIENT_TOKEN`** — authenticate with a RomM client token (`rmm_...`, RomM 5.x) instead of the username/password OAuth2 grant. When set, the token is sent as the bearer credential directly and no `/api/token` call is made; a rejected token surfaces a clear regeneration hint.
+
 ## 1.4.0 — 2026-10-16
 
 Server-side metadata exports, memory cards, recommendations and notifications —

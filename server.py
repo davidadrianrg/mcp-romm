@@ -90,8 +90,11 @@ Write tools (modify your user data, collections, saves, and save states):
 
 Environment variables:
   ROMM_URL              — RomM instance URL (default: http://localhost:3000)
-  ROMM_USERNAME         — RomM username (required)
-  ROMM_PASSWORD         — RomM password (required)
+  ROMM_CLIENT_TOKEN     — RomM client token (rmm_..., RomM 5.x), sent as the
+                          bearer credential directly. Set this OR the
+                          username/password pair below.
+  ROMM_USERNAME         — RomM username (password-grant mode)
+  ROMM_PASSWORD         — RomM password (password-grant mode)
   ROMM_REQUEST_TIMEOUT  — Default request timeout in seconds (default: 30)
   ROMM_REQUEST_TIMEOUT_LONG — Timeout for slow endpoints (default: 60)
   ROMM_TLS_VERIFY       — Verify TLS certificates (default: true)
@@ -142,6 +145,7 @@ class Config:
     romm_url: str
     romm_username: str
     romm_password: str
+    romm_client_token: str
     request_timeout: int
     request_timeout_long: int
     tls_verify: bool
@@ -150,12 +154,17 @@ class Config:
     def from_env(cls) -> Config:
         username = os.getenv("ROMM_USERNAME", "")
         password = os.getenv("ROMM_PASSWORD", "")
-        if not username or not password:
-            log.warning("ROMM_USERNAME/ROMM_PASSWORD not set — all tools will fail")
+        client_token = os.getenv("ROMM_CLIENT_TOKEN", "").strip()
+        if not client_token and (not username or not password):
+            log.warning(
+                "Neither ROMM_CLIENT_TOKEN nor ROMM_USERNAME/ROMM_PASSWORD "
+                "set — all tools will fail"
+            )
         return cls(
             romm_url=os.getenv("ROMM_URL", "http://localhost:3000").rstrip("/"),
             romm_username=username,
             romm_password=password,
+            romm_client_token=client_token,
             request_timeout=int(os.getenv("ROMM_REQUEST_TIMEOUT", "30")),
             request_timeout_long=int(os.getenv("ROMM_REQUEST_TIMEOUT_LONG", "60")),
             tls_verify=os.getenv("ROMM_TLS_VERIFY", "true").lower() in ("true", "1", "yes"),
@@ -163,7 +172,10 @@ class Config:
 
     @property
     def configured(self) -> bool:
-        return bool(self.romm_url and self.romm_username and self.romm_password)
+        return bool(
+            self.romm_url
+            and (self.romm_client_token or (self.romm_username and self.romm_password))
+        )
 
 
 cfg = Config.from_env()
@@ -212,6 +224,17 @@ def _get_client() -> httpx.AsyncClient:
             limits=httpx.Limits(max_connections=4, max_keepalive_connections=2),
         )
     return _clients[cfg.romm_url]
+
+
+async def _auth_token() -> str:
+    """The bearer credential for API calls.
+
+    A configured client token (ROMM_CLIENT_TOKEN, `rmm_...`) is used as-is;
+    otherwise the OAuth2 password grant mints and refreshes an access token.
+    """
+    if cfg.romm_client_token:
+        return cfg.romm_client_token
+    return await _acquire_token()
 
 
 async def _acquire_token() -> str:
@@ -295,8 +318,7 @@ async def _raw_request(
 
     headers: dict[str, str] = {}
     if auth_required:
-        token = await _acquire_token()
-        headers["Authorization"] = f"Bearer {token}"
+        headers["Authorization"] = f"Bearer {await _auth_token()}"
 
     try:
         resp = await client.request(
@@ -305,9 +327,14 @@ async def _raw_request(
         )
 
         if resp.status_code == 401 and auth_required:
+            if cfg.romm_client_token:
+                raise RuntimeError(
+                    "RomM rejected the client token (HTTP 401). Regenerate it "
+                    "in RomM (Settings -> Client tokens) or unset "
+                    "ROMM_CLIENT_TOKEN and use ROMM_USERNAME/ROMM_PASSWORD."
+                )
             _token.access_token = ""
-            token = await _acquire_token()
-            headers["Authorization"] = f"Bearer {token}"
+            headers["Authorization"] = f"Bearer {await _acquire_token()}"
             resp = await client.request(
                 method, url, headers=headers, params=params, json=json, data=data,
                 files=files, timeout=req_timeout,

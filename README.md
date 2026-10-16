@@ -114,8 +114,9 @@ Set environment variables:
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `ROMM_URL` | No | `http://localhost:3000` | Your RomM instance URL |
-| `ROMM_USERNAME` | **Yes** | | RomM username |
-| `ROMM_PASSWORD` | **Yes** | | RomM password |
+| `ROMM_CLIENT_TOKEN` | No | | RomM client token (`rmm_...`, RomM 5.x), sent as the bearer credential directly, skipping the password grant. Set this **or** both `ROMM_USERNAME` and `ROMM_PASSWORD` |
+| `ROMM_USERNAME` | **Yes\*** | | RomM username — required unless `ROMM_CLIENT_TOKEN` is set |
+| `ROMM_PASSWORD` | **Yes\*** | | RomM password — required unless `ROMM_CLIENT_TOKEN` is set |
 | `ROMM_REQUEST_TIMEOUT` | No | `30` | Default request timeout (seconds) |
 | `ROMM_REQUEST_TIMEOUT_LONG` | No | `60` | Timeout for slow endpoints |
 | `ROMM_TLS_VERIFY` | No | `true` | Verify TLS certificates |
@@ -218,7 +219,10 @@ And, with the write tools:
 
 ## Auth
 
-The server uses OAuth2 password grant to authenticate with RomM. Tokens are scoped to the minimum permissions needed and automatically refreshed when they expire. If a request gets a 401, the server re-authenticates and retries once.
+The server authenticates with RomM in one of two modes:
+
+- **Client token (RomM 5.x, recommended):** set `ROMM_CLIENT_TOKEN` to a `rmm_...` token created in RomM (user menu → Client tokens). It is sent as the bearer credential directly — nothing else is stored and no token endpoint is called. The token carries its own scope set; a rejected token fails with a clear regeneration hint.
+- **OAuth2 password grant:** with `ROMM_USERNAME`/`ROMM_PASSWORD`, tokens are scoped to the minimum permissions the tools need and automatically refreshed when they expire. If a request gets a 401, the server re-authenticates and retries once.
 
 **Note:** The read and write tools operate on your own library and user data, so an ordinary **enabled** RomM user account is sufficient — admin is not required. (`romm_scan_library` does require an account permitted to run tasks.)
 
