@@ -1322,3 +1322,309 @@ async def test_export_pegasus_empty_platform_ids_no_request(calls):
     out = await server.romm_export_pegasus([])
     assert out == EMPTY_PLATFORM_IDS_MSG
     assert not calls and not calls.bytes and not calls.uploads
+
+
+# ── romm_memory_cards ───────────────────────────────────────────────────────
+
+CARD_ID_MSG = "card_id must be positive."
+
+
+async def test_memory_cards_shaping_and_fields(calls):
+    calls.responses.append([
+        {"id": 7, "name": "Slot A", "emulator": "pcsx2",
+         "user": {"username": "j"}, "is_public": False, "file_size_bytes": 2048,
+         "created_at": "2026-01-01T00:00:00Z",
+         "updated_at": "2026-02-01T00:00:00Z"},
+        {"id": 9},
+    ])
+    out = await server.romm_memory_cards()
+    assert calls[0]["method"] == "GET"
+    assert calls[0]["path"] == "memory-cards"
+    assert calls[0]["params"] == {}
+    assert "Memory cards (2):" in out
+    assert "  - Slot A [pcsx2]" in out
+    assert "    Owner: j" in out
+    assert "    Public: no" in out
+    assert "    Size: 2 KB" in out
+    assert "    Created: 2026-01-01T00:00:00Z" in out
+    assert "    Updated: 2026-02-01T00:00:00Z" in out
+    assert "    ID: 7" in out
+    # A card missing every optional field renders the name fallback + ID only.
+    assert out.splitlines()[-1] == "    ID: 9"
+    assert "  - Unnamed card" in out
+
+
+async def test_memory_cards_emulator_filter(calls):
+    calls.responses.append([])
+    await server.romm_memory_cards(emulator="pcsx2")
+    assert calls[0]["params"] == {"emulator": "pcsx2"}
+
+
+async def test_memory_cards_empty_message(calls):
+    calls.responses.extend([[], []])
+    out = await server.romm_memory_cards()
+    assert out == "No memory cards found."
+    out = await server.romm_memory_cards(emulator="pcsx2")
+    assert out == "No memory cards found for emulator pcsx2."
+
+
+async def test_memory_cards_accepts_items_dict(calls):
+    calls.responses.append({"items": [{"id": 1, "name": "A"}]})
+    out = await server.romm_memory_cards()
+    assert "  - A" in out
+    assert "    ID: 1" in out
+
+
+# ── romm_memory_card_detail ─────────────────────────────────────────────────
+
+
+async def test_memory_card_detail_shaping_and_fields(calls):
+    calls.responses.append({
+        "id": 7, "name": "Slot A", "file_name": "slotA.ps2",
+        "emulator": "pcsx2", "user": {"username": "j"}, "is_public": True,
+        "file_size_bytes": 2048, "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-02-01T00:00:00Z", "version_count": 3,
+    })
+    out = await server.romm_memory_card_detail(7)
+    assert calls[0]["method"] == "GET"
+    assert calls[0]["path"] == "memory-cards/7"
+    assert "Memory card 7:" in out
+    assert "  Name: Slot A" in out
+    assert "  File: slotA.ps2" in out
+    assert "  Emulator: pcsx2" in out
+    assert "  Owner: j" in out
+    assert "  Public: yes" in out
+    assert "  Size: 2 KB" in out
+    assert "  Created: 2026-01-01T00:00:00Z" in out
+    assert "  Updated: 2026-02-01T00:00:00Z" in out
+    assert "  Versions: 3" in out
+    assert out.splitlines()[-1] == "  ID: 7"
+
+
+async def test_memory_card_detail_omits_absent_fields(calls):
+    calls.responses.append({"id": 8})
+    out = await server.romm_memory_card_detail(8)
+    assert out.splitlines() == ["Memory card 8:", "  ID: 8"]
+
+
+async def test_memory_card_detail_not_found(calls):
+    calls.responses.extend([{}, []])
+    assert await server.romm_memory_card_detail(7) == "Memory card 7 not found."
+    assert await server.romm_memory_card_detail(7) == "Memory card 7 not found."
+
+
+async def test_memory_card_detail_rejects_bad_id(calls):
+    for bad in (0, -1):
+        assert await server.romm_memory_card_detail(bad) == CARD_ID_MSG
+    assert not calls and not calls.bytes and not calls.uploads
+
+
+# ── romm_memory_card_versions ───────────────────────────────────────────────
+
+
+async def test_memory_card_versions_shaping_and_rows(calls):
+    calls.responses.append([
+        {"id": 11, "version": 3, "created_at": "2026-01-01T00:00:00Z",
+         "file_name": "v3.zip", "file_size_bytes": 4096},
+    ])
+    out = await server.romm_memory_card_versions(7)
+    assert calls[0]["method"] == "GET"
+    assert calls[0]["path"] == "memory-cards/7/versions"
+    assert "Memory card 7 versions (1):" in out
+    assert "  1. Version 3" in out
+    assert "    Created: 2026-01-01T00:00:00Z" in out
+    assert "    File: v3.zip" in out
+    assert "    Size: 4 KB" in out
+    assert "    ID: 11" in out
+
+
+async def test_memory_card_versions_empty(calls):
+    calls.responses.append([])
+    out = await server.romm_memory_card_versions(7)
+    assert out == "No versions recorded for memory card 7."
+
+
+async def test_memory_card_versions_rejects_bad_id(calls):
+    for bad in (0, -1):
+        assert await server.romm_memory_card_versions(bad) == CARD_ID_MSG
+    assert not calls and not calls.bytes and not calls.uploads
+
+
+# ── romm_memory_card_download ───────────────────────────────────────────────
+
+VERSION_ID_MSG = "version_id must be 0 (latest) or a positive ID."
+
+
+async def test_memory_card_download_latest_shaping(calls, tmp_path):
+    calls.bytes_responses.append((b"BIN", {}))
+    target = tmp_path / "out.bin"
+    out = await server.romm_memory_card_download(7, str(target))
+    req = calls.bytes[0]
+    assert req["method"] == "GET"
+    assert req["path"] == "memory-cards/7/content"
+    assert req["params"] is None
+    assert req["long_timeout"] is True
+    assert target.read_bytes() == b"BIN"
+    assert f"Saved memory card 7 to {target} (3 B)." in out
+
+
+async def test_memory_card_download_version_routing(calls, tmp_path):
+    calls.bytes_responses.append((b"V3", {}))
+    out = await server.romm_memory_card_download(7, str(tmp_path), version_id=3)
+    assert calls.bytes[0]["path"] == "memory-cards/versions/3/content"
+    assert (tmp_path / "memory_card_7_v3.bin").read_bytes() == b"V3"
+    assert "version 3" in out
+
+
+async def test_memory_card_download_default_name_fallback(calls, tmp_path):
+    calls.bytes_responses.append((b"X", {}))
+    out = await server.romm_memory_card_download(7, str(tmp_path))
+    assert (tmp_path / "memory_card_7.bin").read_bytes() == b"X"
+    assert str(tmp_path / "memory_card_7.bin") in out
+
+
+async def test_memory_card_download_refuses_existing_file(calls, tmp_path):
+    target = tmp_path / "keep.bin"
+    target.write_bytes(b"ORIGINAL")
+    calls.bytes_responses.append((b"NEWDATA", {}))
+    out = await server.romm_memory_card_download(7, str(target))
+    assert "File already exists" in out
+    assert "overwrite=True" in out
+    assert target.read_bytes() == b"ORIGINAL"
+
+
+async def test_memory_card_download_overwrite_replaces(calls, tmp_path):
+    target = tmp_path / "keep.bin"
+    target.write_bytes(b"OLD")
+    calls.bytes_responses.append((b"NEW", {}))
+    out = await server.romm_memory_card_download(7, str(target), overwrite=True)
+    assert target.read_bytes() == b"NEW"
+    assert f"Saved memory card 7 to {target} (3 B)." in out
+
+
+async def test_memory_card_download_rejects_bad_ids(calls, tmp_path):
+    target = str(tmp_path / "none.bin")
+    assert await server.romm_memory_card_download(0, target) == CARD_ID_MSG
+    assert await server.romm_memory_card_download(7, target, version_id=-1) == (
+        VERSION_ID_MSG)
+    assert not calls.bytes and not calls and not calls.uploads
+
+
+# ── romm_memory_card_version_upload ─────────────────────────────────────────
+
+BROKER_ZIP_MSG = ("Memory card versions accept only the broker-layout zip; "
+                  "loose .ps2/.raw images are rejected.")
+
+
+async def test_memory_card_version_upload_shaping(calls, tmp_path):
+    card_file = tmp_path / "card.zip"
+    card_file.write_bytes(b"ZIP")
+    calls.uploads_responses.append({"id": 11})
+    out = await server.romm_memory_card_version_upload(7, str(card_file))
+    req = calls.uploads[0]
+    assert req["method"] == "POST"
+    assert req["path"] == "memory-cards/7/versions"
+    assert req["params"] is None
+    assert req["long_timeout"] is True
+    assert req["files"] == {
+        "cardFile": ("card.zip", b"ZIP", "application/octet-stream")}
+    assert "(version id: 11)" in out
+
+
+async def test_memory_card_version_upload_missing_file_no_request(calls, tmp_path):
+    missing = str(tmp_path / "nope.zip")
+    out = await server.romm_memory_card_version_upload(7, missing)
+    assert out == f"File not found: {missing}."
+    assert not calls.uploads and not calls and not calls.bytes
+
+
+async def test_memory_card_version_upload_rejects_loose_ps2(calls, tmp_path):
+    # Case-insensitive: ".PS2" is rejected too.
+    loose = tmp_path / "memory.PS2"
+    loose.write_bytes(b"raw")
+    out = await server.romm_memory_card_version_upload(7, str(loose))
+    assert out == BROKER_ZIP_MSG
+    assert not calls.uploads and not calls and not calls.bytes
+
+
+async def test_memory_card_version_upload_rejects_loose_raw(calls, tmp_path):
+    loose = tmp_path / "memory.raw"
+    loose.write_bytes(b"raw")
+    out = await server.romm_memory_card_version_upload(7, str(loose))
+    assert out == BROKER_ZIP_MSG
+    assert not calls.uploads and not calls and not calls.bytes
+
+
+async def test_memory_card_version_upload_rejects_bad_card_id(calls, tmp_path):
+    card_file = tmp_path / "card.zip"
+    card_file.write_bytes(b"ZIP")
+    out = await server.romm_memory_card_version_upload(0, str(card_file))
+    assert out == CARD_ID_MSG
+    assert not calls.uploads
+
+
+# ── romm_memory_card_update / romm_memory_card_delete ───────────────────────
+
+NO_UPDATE_MSG = "Nothing to update — provide a field to change."
+
+
+async def test_memory_card_update_name_only_one_put(calls):
+    calls.responses.append({})
+    out = await server.romm_memory_card_update(7, name="Slot A")
+    assert len(calls) == 1
+    assert calls[0]["method"] == "PUT"
+    assert calls[0]["path"] == "memory-cards/7"
+    assert calls[0]["json"] == {"name": "Slot A"}
+    assert "updated name" in out
+
+
+async def test_memory_card_update_visibility_only_one_put(calls):
+    calls.responses.append({})
+    out = await server.romm_memory_card_update(7, is_public=False)
+    assert len(calls) == 1
+    assert calls[0]["path"] == "memory-cards/7/visibility"
+    assert calls[0]["json"] == {"is_public": False}
+    assert "updated is_public" in out
+
+
+async def test_memory_card_update_both_fixed_order(calls):
+    calls.responses.extend([{}, {}])
+    out = await server.romm_memory_card_update(7, name="Slot A", is_public=True)
+    assert [c["path"] for c in calls] == [
+        "memory-cards/7", "memory-cards/7/visibility"]
+    assert [c["json"] for c in calls] == [
+        {"name": "Slot A"}, {"is_public": True}]
+    assert "updated name, is_public" in out
+
+
+async def test_memory_card_update_noop_no_request(calls):
+    out = await server.romm_memory_card_update(7)
+    assert out == NO_UPDATE_MSG
+    assert not calls and not calls.bytes and not calls.uploads
+
+
+async def test_memory_card_update_blank_name_treated_as_not_given(calls):
+    out = await server.romm_memory_card_update(7, name="   ")
+    assert out == NO_UPDATE_MSG
+    assert not calls and not calls.bytes and not calls.uploads
+
+
+async def test_memory_card_delete_posts_cards_body(calls):
+    calls.responses.append({})
+    out = await server.romm_memory_card_delete(7)
+    assert calls[0]["method"] == "POST"
+    assert calls[0]["path"] == "memory-cards/delete"
+    assert calls[0]["json"] == {"cards": [7]}
+    assert out == "Deleted memory card 7."
+
+
+def test_memory_card_delete_docstring_is_destructive():
+    doc = server.romm_memory_card_delete.__doc__
+    assert doc.startswith("Permanently")
+    assert "cannot be undone" in doc
+
+
+async def test_memory_card_delete_rejects_bad_id(calls):
+    out = await server.romm_memory_card_delete(0)
+    assert out == CARD_ID_MSG
+    assert not calls

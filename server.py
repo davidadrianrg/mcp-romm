@@ -601,6 +601,28 @@ async def _put_asset_props(
     return changed
 
 
+async def _put_memory_card_props(
+    card_id: int,
+    *,
+    name: str | None = None,
+    is_public: bool | None = None,
+) -> list[str]:
+    """Update memory-card properties, sending only the fields given.
+
+    Each property has its own RomM endpoint; the name and visibility are
+    updated in that fixed order and only when the matching argument is not
+    None. Returns the changed field names in the same order.
+    """
+    changed: list[str] = []
+    if name is not None:
+        await _put(f"memory-cards/{card_id}", {"name": name})
+        changed.append("name")
+    if is_public is not None:
+        await _put(f"memory-cards/{card_id}/visibility", {"is_public": is_public})
+        changed.append("is_public")
+    return changed
+
+
 # ── Tools — Status & Stats ──────────────────────────────────────────────
 
 
@@ -1616,6 +1638,237 @@ async def romm_save_update(save_id: int, labels: list[str] | None = None,
         "saves", save_id, labels=labels, is_public=is_public, file_name=file_name,
     )
     return f"Save file {save_id}: updated {', '.join(changed)}."
+
+
+# ── Tools — Memory cards (RomM 5.x) ──────────────────────────────────────
+
+
+@mcp.tool()
+async def romm_memory_cards(emulator: str = "") -> str:
+    """List memory cards (RomM 5.x).
+
+    emulator: Filter to a single emulator (default: all).
+    """
+    params: dict = {}
+    if emulator:
+        params["emulator"] = emulator
+
+    data = await _get("memory-cards", params=params)
+
+    items = data.get("items", []) if isinstance(data, dict) else data
+    if not isinstance(items, list) or not items:
+        qualifier = f" for emulator {emulator}" if emulator else ""
+        return f"No memory cards found{qualifier}."
+
+    lines = [f"Memory cards ({len(items)}):\n"]
+    for card in items[:50]:
+        name = card.get("name") or "Unnamed card"
+        card_emulator = card.get("emulator", "")
+        line = f"  - {name}"
+        if card_emulator:
+            line += f" [{card_emulator}]"
+        lines.append(line)
+        user = card.get("user")
+        owner = (user.get("username") if isinstance(user, dict) else None) \
+            or card.get("owner") or card.get("username")
+        if owner:
+            lines.append(f"    Owner: {owner}")
+        if card.get("is_public") is not None:
+            lines.append(f"    Public: {'yes' if card['is_public'] else 'no'}")
+        size = card.get("file_size_bytes") or card.get("size_bytes")
+        if size:
+            lines.append(f"    Size: {_fmt_size(size)}")
+        if card.get("created_at"):
+            lines.append(f"    Created: {card['created_at']}")
+        if card.get("updated_at"):
+            lines.append(f"    Updated: {card['updated_at']}")
+        lines.append(f"    ID: {card.get('id', '?')}")
+
+    if len(items) > 50:
+        lines.append(f"\n  ({len(items) - 50} more not shown)")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def romm_memory_card_detail(card_id: int) -> str:
+    """Show full detail for a single memory card (RomM 5.x).
+
+    card_id: The memory card's ID (from romm_memory_cards).
+    """
+    if card_id <= 0:
+        return "card_id must be positive."
+
+    data = await _get(f"memory-cards/{card_id}")
+
+    if not isinstance(data, dict) or "id" not in data:
+        return f"Memory card {card_id} not found."
+
+    lines = [f"Memory card {card_id}:"]
+    if data.get("name"):
+        lines.append(f"  Name: {data['name']}")
+    if data.get("file_name"):
+        lines.append(f"  File: {data['file_name']}")
+    if data.get("emulator"):
+        lines.append(f"  Emulator: {data['emulator']}")
+    user = data.get("user")
+    owner = (user.get("username") if isinstance(user, dict) else None) \
+        or data.get("owner") or data.get("username")
+    if owner:
+        lines.append(f"  Owner: {owner}")
+    if data.get("is_public") is not None:
+        lines.append(f"  Public: {'yes' if data['is_public'] else 'no'}")
+    size = data.get("file_size_bytes") or data.get("size_bytes")
+    if size:
+        lines.append(f"  Size: {_fmt_size(size)}")
+    if data.get("created_at"):
+        lines.append(f"  Created: {data['created_at']}")
+    if data.get("updated_at"):
+        lines.append(f"  Updated: {data['updated_at']}")
+    version_count = data.get("version_count")
+    if version_count is None and isinstance(data.get("versions"), list):
+        version_count = len(data["versions"])
+    if version_count is not None:
+        lines.append(f"  Versions: {version_count}")
+    lines.append(f"  ID: {data['id']}")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def romm_memory_card_versions(card_id: int) -> str:
+    """List saved versions of a memory card (RomM 5.x).
+
+    card_id: The memory card's ID (from romm_memory_cards).
+    """
+    if card_id <= 0:
+        return "card_id must be positive."
+
+    data = await _get(f"memory-cards/{card_id}/versions")
+
+    items = data.get("items", []) if isinstance(data, dict) else data
+    if not isinstance(items, list) or not items:
+        return f"No versions recorded for memory card {card_id}."
+
+    lines = [f"Memory card {card_id} versions ({len(items)}):\n"]
+    for i, item in enumerate(items[:50], 1):
+        version = item.get("version", item.get("id", "?"))
+        lines.append(f"  {i}. Version {version}")
+        if item.get("created_at"):
+            lines.append(f"    Created: {item['created_at']}")
+        if item.get("file_name"):
+            lines.append(f"    File: {item['file_name']}")
+        if item.get("file_size_bytes"):
+            lines.append(f"    Size: {_fmt_size(item['file_size_bytes'])}")
+        lines.append(f"    ID: {item.get('id', '?')}")
+
+    if len(items) > 50:
+        lines.append(f"\n  ({len(items) - 50} more not shown)")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def romm_memory_card_download(card_id: int, target_path: str,
+                                    version_id: int = 0,
+                                    overwrite: bool = False) -> str:
+    """Download a memory card to a local path (RomM 5.x).
+
+    card_id: The memory card's ID (from romm_memory_cards).
+    target_path: Destination file or directory. A directory (an existing one,
+                 or a path ending in a separator) keeps RomM's suggested name.
+    version_id: Download a specific version (from romm_memory_card_versions).
+                0 (default) downloads the latest.
+    overwrite: Replace an existing file (default: false).
+    """
+    if card_id <= 0:
+        return "card_id must be positive."
+    if version_id < 0:
+        return "version_id must be 0 (latest) or a positive ID."
+
+    if version_id > 0:
+        content_path = f"memory-cards/versions/{version_id}/content"
+        default_name = f"memory_card_{card_id}_v{version_id}.bin"
+    else:
+        content_path = f"memory-cards/{card_id}/content"
+        default_name = f"memory_card_{card_id}.bin"
+
+    content, headers = await _request_bytes(
+        "GET", content_path, long_timeout=True,
+    )
+    try:
+        dest, size = _write_download(
+            content, headers, target_path=target_path,
+            default_name=default_name, overwrite=overwrite,
+        )
+    except FileExistsError as e:
+        return f"File already exists: {e} (use overwrite=True to replace it)."
+    if version_id > 0:
+        return (f"Saved memory card {card_id} version {version_id} to {dest} "
+                f"({_fmt_size(size)}).")
+    return f"Saved memory card {card_id} to {dest} ({_fmt_size(size)})."
+
+
+@mcp.tool()
+async def romm_memory_card_version_upload(card_id: int, file_path: str) -> str:
+    """Upload a new version of a memory card (RomM 5.x). Requires assets.write.
+
+    RomM accepts only the broker-layout memory-card zip for versions and
+    rejects loose .ps2/.raw images.
+
+    card_id: The memory card's ID (from romm_memory_cards).
+    file_path: Path to the local broker-layout memory-card zip to upload.
+    """
+    if card_id <= 0:
+        return "card_id must be positive."
+    if not os.path.isfile(file_path):
+        return f"File not found: {file_path}."
+    if os.path.splitext(file_path)[1].lower() in (".ps2", ".raw"):
+        return ("Memory card versions accept only the broker-layout zip; "
+                "loose .ps2/.raw images are rejected.")
+
+    file_bytes = _read_file_bytes(file_path)
+    files: dict[str, tuple[str, bytes, str]] = {
+        "cardFile": (os.path.basename(file_path), file_bytes, "application/octet-stream"),
+    }
+    data = await _request_multipart(
+        "POST", f"memory-cards/{card_id}/versions", files=files, long_timeout=True,
+    )
+    version_id = data.get("id", "?") if isinstance(data, dict) else "?"
+    return (f"Uploaded a new version of memory card {card_id} "
+            f"(version id: {version_id}).")
+
+
+@mcp.tool()
+async def romm_memory_card_update(card_id: int, name: str = "",
+                                  is_public: bool | None = None) -> str:
+    """Update a memory card's metadata. Only the fields you provide are changed.
+
+    card_id: The memory card's ID (from romm_memory_cards).
+    name: New display name (empty = unchanged).
+    is_public: New visibility (omit to leave unchanged).
+    """
+    if card_id <= 0:
+        return "card_id must be positive."
+    has_name = bool(name.strip())
+    if not has_name and is_public is None:
+        return "Nothing to update — provide a field to change."
+    changed = await _put_memory_card_props(
+        card_id, name=name.strip() if has_name else None, is_public=is_public,
+    )
+    return f"Memory card {card_id}: updated {', '.join(changed)}."
+
+
+@mcp.tool()
+async def romm_memory_card_delete(card_id: int) -> str:
+    """Permanently delete a memory card. This cannot be undone.
+
+    card_id: The memory card's ID (from romm_memory_cards).
+    """
+    if card_id <= 0:
+        return "card_id must be positive."
+    await _post("memory-cards/delete", {"cards": [card_id]})
+    return f"Deleted memory card {card_id}."
 
 
 # ── Tools — Firmware & Devices ───────────────────────────────────────────
